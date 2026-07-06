@@ -183,9 +183,9 @@ class FleetPane(Pane):
                 (status, status_col),
                 (" @ ", PAL.text_muted),
                 (nav.get("waypointSymbol", ""), PAL.text),
-                ("   role ", PAL.text_muted),
+                (" · role ", PAL.text_muted),
                 (reg.get("role", "?").title(), PAL.accent),
-                ("   mode ", PAL.text_muted),
+                (" · mode ", PAL.text_muted),
                 (nav.get("flightMode", ""), PAL.text_dim),
             )
         )
@@ -212,6 +212,12 @@ class FleetPane(Pane):
         for sym, card in self.cards.items():
             card.select(sym == self.focus)
 
+    def focus_ship(self, symbol: str) -> None:
+        if symbol in self.order:
+            self.focus = symbol
+            for sym, card in self.cards.items():
+                card.select(sym == self.focus)
+
 
 # ---------------- Contracts -----------------------------------------------
 class ContractsPane(Pane):
@@ -221,32 +227,45 @@ class ContractsPane(Pane):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.cards: dict[str, ContractCard] = {}
+        self.buttons: dict[str, Button] = {}
 
     def body(self):
         yield Container(id="contract-list")
+
+    def _sync_button(self, btn: Button, c: dict) -> None:
+        if c.get("fulfilled"):
+            btn.label = "✓ Fulfilled"
+            btn.disabled = True
+        elif c.get("accepted"):
+            btn.label = "◌ In progress"
+            btn.disabled = True
+        else:
+            btn.label = "Accept"
+            btn.disabled = False
+        btn.set_class(btn.disabled, "--ghost")
+        btn.set_class(not btn.disabled, "--primary")
 
     def refresh_state(self, app) -> None:
         lst = self.query_one("#contract-list", Container)
         seen = {c["id"] for c in (app.contracts or [])}
         for cid, card in list(self.cards.items()):
             if cid not in seen:
-                card.remove()
+                card.parent.remove()
                 del self.cards[cid]
+                self.buttons.pop(cid, None)
         for c in app.contracts or []:
             cid = c["id"]
             if cid not in self.cards:
                 card = ContractCard(c)
-                accepted = c.get("accepted")
-                fulfilled = c.get("fulfilled")
-                label = "Fulfilled" if fulfilled else ("Abandon" if accepted else "Accept")
-                style = "--ghost" if accepted else "--primary"
-                btn = Button(label, id=f"cta-{cid}", classes=f"btn {style}")
+                btn = Button("Accept", id=f"cta-{cid}", classes="btn --primary")
+                self._sync_button(btn, c)
                 wrap = Container(card, btn, classes="contract-wrap")
                 self.cards[cid] = card
+                self.buttons[cid] = btn
                 lst.mount(wrap)
-                self.call_after_refresh(card.update, c)
             else:
                 self.cards[cid].update(c)
+                self._sync_button(self.buttons[cid], c)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id and event.button.id.startswith("cta-"):
@@ -256,67 +275,114 @@ class ContractsPane(Pane):
 
 # ---------------- Markets -------------------------------------------------
 class MarketsPane(Pane):
+    """Live market at the focused ship's waypoint + best routes from the
+    shared price ledger. All API calls happen off the UI thread."""
+
     title = "$  MARKETS"
-    sub = "focused ship's waypoint · and your HQ"
+    sub = "focused ship's market · best known trade routes"
 
     def body(self):
-        yield Panel("FOCUSED WAYPOINT", Static("", id="m-focus-name"), classes="m-panel")
-        yield DataTable(id="m-focus-table")
-        yield Panel("HEADQUARTERS", Static("", id="m-hq-name"), classes="m-panel")
-        yield DataTable(id="m-hq-table")
+        yield Panel("FOCUSED WAYPOINT", Static("no focused ship", id="m-focus-name"), classes="m-panel")
+        yield DataTable(id="m-focus-table", classes="market-table")
+        yield Panel(
+            "BEST KNOWN ROUTES",
+            Static("gathered from every market your ships visit", id="m-routes-name"),
+            classes="m-panel",
+        )
+        yield DataTable(id="m-routes-table", classes="market-table")
 
     def refresh_state(self, app) -> None:
-        import re
-
-        def system_of(wp):
-            m = re.match(r"^(X1-[A-Z0-9]+)-", wp)
-            return m.group(1) if m else wp
-
-        def fill(table_id, name_id, wp):
-            table = self.query_one(table_id, DataTable)
-            if table.columns is None or len(table.columns) == 0:
-                table.add_columns("Good", "Type", "Buy", "Sell")
-            table.clear()
-            try:
-                m = app.client.market(system_of(wp), wp)
-            except Exception:
-                self.query_one(name_id, Static).update(Text(f"{wp} — no market data", style=PAL.text_muted))
-                return
-            self.query_one(name_id, Static).update(
-                Text.assemble((wp, PAL.text), ("  ·  ", PAL.text_muted), (m.get("symbol", ""), PAL.text_dim))
-            )
-            goods = sorted(
-                m.get("tradeGoods", []),
-                key=lambda g: (g.get("type", ""), -g.get("purchasePrice", 0)),
-            )
-            for g in goods:
-                typ = g.get("type", "")
-                tcol = {"IMPORT": PAL.warning, "EXPORT": PAL.success, "EXCHANGE": PAL.primary}.get(typ, PAL.text_dim)
-                table.add_row(
-                    Text(g.get("symbol", ""), style=PAL.text),
-                    Text(typ, style=tcol),
-                    Text(str(g.get("purchasePrice", "-")), style=PAL.text),
-                    Text(str(g.get("sellPrice", "-")), style=PAL.text_dim),
-                )
-
         focus_wp = ""
         if app.fleet_pane and app.fleet_pane.focus:
             ship = next((s for s in (app.ships or []) if s["symbol"] == app.fleet_pane.focus), None)
             if ship:
                 focus_wp = ship.get("nav", {}).get("waypointSymbol", "")
+        if not focus_wp and app.hq:
+            focus_wp = app.hq
+        app.run_worker(
+            lambda: self._fetch(app, focus_wp),
+            thread=True,
+            exclusive=True,
+            group="markets",
+        )
+
+    # runs in a worker thread
+    def _fetch(self, app, focus_wp: str) -> None:
+        from navigation import system_of
+
+        market = None
         if focus_wp:
-            fill("#m-focus-table", "#m-focus-name", focus_wp)
+            try:
+                market = app.client.market(system_of(focus_wp), focus_wp)
+                app.db.record_market(market)
+            except Exception:  # noqa: BLE001 - waypoint may have no market
+                market = None
+        routes = []
+        try:
+            from market import best_routes
+
+            system = system_of(focus_wp or app.hq)
+            if system:
+                routes = best_routes(app.db, app.cache, system)[:12]
+        except Exception:  # noqa: BLE001
+            routes = []
+        app.call_from_thread(self._fill, focus_wp, market, routes)
+
+    # back on the UI thread
+    def _fill(self, focus_wp: str, market: dict | None, routes: list) -> None:
+        table = self.query_one("#m-focus-table", DataTable)
+        if not table.columns:
+            table.add_columns("Good", "Type", "Buy", "Sell", "Vol", "Supply")
+        table.clear()
+        name = self.query_one("#m-focus-name", Static)
+        if market is None:
+            name.update(Text(f"{focus_wp or '—'} · no market here", style=PAL.text_muted))
         else:
-            self.query_one("#m-focus-name", Static).update(Text("no focused ship", style=PAL.text_muted))
-            self.query_one("#m-focus-table", DataTable).clear()
-        hq = app.hq
-        fill("#m-hq-table", "#m-hq-name", hq)
+            name.update(
+                Text.assemble((market.get("symbol", ""), PAL.text), ("  · live prices", PAL.text_muted))
+            )
+            goods = sorted(
+                market.get("tradeGoods", []),
+                key=lambda g: (g.get("type", ""), -(g.get("purchasePrice") or 0)),
+            )
+            for g in goods:
+                typ = g.get("type", "")
+                tcol = {"IMPORT": PAL.warning, "EXPORT": PAL.success, "EXCHANGE": PAL.primary}.get(
+                    typ, PAL.text_dim
+                )
+                table.add_row(
+                    Text(g.get("symbol", ""), style=PAL.text),
+                    Text(typ, style=tcol),
+                    Text(str(g.get("purchasePrice", "-")), style=PAL.text),
+                    Text(str(g.get("sellPrice", "-")), style=PAL.text_dim),
+                    Text(str(g.get("tradeVolume", "-")), style=PAL.text_muted),
+                    Text(g.get("supply", ""), style=PAL.text_muted),
+                )
+
+        rtable = self.query_one("#m-routes-table", DataTable)
+        if not rtable.columns:
+            rtable.add_columns("Good", "Buy @", "", "Sell @", "", "+/unit", "Dist")
+        rtable.clear()
+        for r in routes:
+            rtable.add_row(
+                Text(r.good, style=PAL.text),
+                Text(r.buy_waypoint, style=PAL.text_dim),
+                Text(str(r.buy_price), style=PAL.success),
+                Text(r.sell_waypoint, style=PAL.text_dim),
+                Text(str(r.sell_price), style=PAL.warning),
+                Text(f"+{r.margin}", style=PAL.secondary),
+                Text(f"{r.dist:.0f}", style=PAL.text_muted),
+            )
+        if not routes:
+            self.query_one("#m-routes-name", Static).update(
+                Text("no routes yet — run a probe/trader bot to gather prices", style=PAL.text_muted)
+            )
 
 
 # ---------------- Automation ----------------------------------------------
 class AutomationPane(Pane):
     title = "⚙  AUTOMATION"
-    sub = "launch autonomous miners · watch their logs"
+    sub = "◇ cycles the bot type (mine / trade / contract / probe) · ▶ launches it"
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -337,9 +403,13 @@ class AutomationPane(Pane):
         for s in app.ships or []:
             sym = s["symbol"]
             if sym not in self.rows:
+                from automation import BOT_TYPES, default_bot_for
+
                 from .widgets import BotRow
 
-                row = BotRow(s)
+                cls = default_bot_for(s)
+                kind = next((k for k, v in BOT_TYPES.items() if v is cls), "mine")
+                row = BotRow(s, kind=kind)
                 self.rows[sym] = row
                 grid.mount(row)
 

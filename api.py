@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Iterator
 
@@ -16,12 +17,40 @@ class ApiError(Exception):
         self.data = data or {}
 
 
+class RateLimiter:
+    """Token-bucket limiter shared across bot threads.
+
+    SpaceTraders allows 2 requests/second (with a small burst); staying under
+    it client-side avoids burning the 429 retry budget when several bots run.
+    """
+
+    def __init__(self, rate: float = 2.0, burst: int = 2):
+        self.rate = rate
+        self.burst = burst
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.burst, self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                wait = (1 - self._tokens) / self.rate
+            time.sleep(wait)
+
+
 class Client:
     """Thin wrapper around the SpaceTraders v2 API."""
 
     def __init__(self, token: str | None = None, base_url: str | None = None):
         self.token = token or config.AGENT_TOKEN
         self.base_url = (base_url or config.BASE_URL).rstrip("/")
+        self.limiter = RateLimiter()
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -42,8 +71,15 @@ class Client:
         retry_on_rate_limit: bool = True,
     ) -> dict:
         url = f"{self.base_url}{path}"
-        for attempt in range(3 if retry_on_rate_limit else 1):
-            resp = self.session.request(method, url, params=params, json=json, timeout=30)
+        for attempt in range(6 if retry_on_rate_limit else 1):
+            self.limiter.acquire()
+            try:
+                resp = self.session.request(method, url, params=params, json=json, timeout=30)
+            except requests.RequestException:
+                if attempt >= 2 or not retry_on_rate_limit:
+                    raise
+                time.sleep(2**attempt)
+                continue
             if resp.status_code == 429 and retry_on_rate_limit:
                 retry = float(resp.headers.get("Retry-After", "1") or 1)
                 time.sleep(retry)
@@ -108,6 +144,18 @@ class Client:
 
     def fulfill_contract(self, contract_id: str) -> dict:
         return self.post(f"/my/contracts/{contract_id}/fulfill", json={})["data"]
+
+    def deliver_contract(
+        self, contract_id: str, ship_symbol: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/my/contracts/{contract_id}/deliver",
+            json={
+                "shipSymbol": ship_symbol,
+                "tradeSymbol": trade_symbol,
+                "units": int(units),
+            },
+        )["data"]
 
     # -- ships -------------------------------------------------------------
     def ships(self) -> list[dict]:
@@ -179,6 +227,53 @@ class Client:
     def cargo(self, symbol: str) -> dict:
         return self.get(f"/my/ships/{symbol}/cargo")["data"]
 
+    def transfer(
+        self, from_ship: str, to_ship: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/my/ships/{from_ship}/transfer",
+            json={"tradeSymbol": trade_symbol, "units": int(units), "shipSymbol": to_ship},
+        )["data"]
+
+    def siphon(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/siphon", json={})["data"]
+
+    def refine(self, symbol: str, produce: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/refine", json={"produce": produce})["data"]
+
+    def chart(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/chart", json={})["data"]
+
+    def scan_waypoints(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/waypoints", json={})["data"]
+
+    def scan_systems(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/systems", json={})["data"]
+
+    def scan_ships(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/ships", json={})["data"]
+
+    def repair(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/repair", json={})["data"]
+
+    def repair_quote(self, symbol: str) -> dict:
+        return self.get(f"/my/ships/{symbol}/repair")["data"]
+
+    def purchase_ship(self, ship_type: str, waypoint: str) -> dict:
+        return self.post(
+            "/my/ships", json={"shipType": ship_type, "waypointSymbol": waypoint}
+        )["data"]
+
+    def install_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/install", json={"symbol": mount_symbol}
+        )["data"]
+
+    def remove_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/remove", json={"symbol": mount_symbol}
+        )["data"]
+
     # -- world -------------------------------------------------------------
     def systems(self) -> list[dict]:
         return list(self.paginate("/systems"))
@@ -200,6 +295,24 @@ class Client:
 
     def jump_gate(self, system: str, waypoint: str) -> dict:
         return self.get(f"/systems/{system}/waypoints/{waypoint}/jump-gate")["data"]
+
+    def construction(self, system: str, waypoint: str) -> dict:
+        return self.get(f"/systems/{system}/waypoints/{waypoint}/construction")["data"]
+
+    def supply_construction(
+        self, system: str, waypoint: str, ship_symbol: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/systems/{system}/waypoints/{waypoint}/construction/supply",
+            json={
+                "shipSymbol": ship_symbol,
+                "tradeSymbol": trade_symbol,
+                "units": int(units),
+            },
+        )["data"]
+
+    def factions(self) -> list[dict]:
+        return list(self.paginate("/factions"))
 
     # -- account / registration -------------------------------------------
     @classmethod

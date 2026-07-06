@@ -146,6 +146,7 @@ class ShipCard(Container):
     def __init__(self, ship: dict, **kw):
         super().__init__(classes="ship-card", **kw)
         self.symbol = ship["symbol"]
+        self._ship = ship
 
     def compose(self):
         with Horizontal(classes="ship-head"):
@@ -161,19 +162,22 @@ class ShipCard(Container):
         self.meta_w = Static("", classes="meta-line")
         yield self.meta_w
 
+    def on_mount(self) -> None:
+        self.update(self._ship)
+
     def on_click(self, event) -> None:
         self.post_message(self.Selected(self.symbol))
 
     def update(self, ship: dict) -> None:
+        self._ship = ship
+        if not hasattr(self, "meta_w"):
+            return  # not composed yet; on_mount will apply _ship
         nav = ship.get("nav", {})
         frame = ship.get("frame", {})
         reg = ship.get("registration", {})
         status = nav.get("status", "")
         label, _col, variant = NAV_STATUS.get(status, (status, PAL.text_muted, "idle"))
-        dest = ""
-        if status == "IN_TRANSIT":
-            dest = "→" + nav.get("route", {}).get("destination", {}).get("symbol", "")
-        self.pill.set(f"{label}{dest}", variant)
+        self.pill.set(label, variant)
         self.frame_w.update(
             Text.assemble(
                 (frame.get("name", "?"), PAL.text_dim),
@@ -195,21 +199,19 @@ class ContractCard(Container):
     def __init__(self, contract: dict, **kw):
         super().__init__(classes="contract-card", **kw)
         self.cid = contract["id"]
+        self._contract = contract
         self._delivers = contract.get("terms", {}).get("deliver", [])
 
     def compose(self):
-        with Horizontal(classes="contract-head"):
-            self.faction_w = Static("", classes="contract-faction")
-            yield self.faction_w
-            self.type_w = Static("", classes="contract-type")
-            yield self.type_w
+        self.head_w = Static("", classes="contract-head")
+        yield self.head_w
         self.pay_w = Static("", classes="pay")
         yield self.pay_w
         self._deliver_widgets = []
         for d in self._delivers:
             line = Static("", classes="deliver")
             g = Gauge(
-                d["tradeSymbol"].replace("_ORE", "").replace("_", " "),
+                d["tradeSymbol"].replace("_ORE", "").replace("_", " ")[:6],
                 0,
                 d["unitsRequired"],
                 color=PAL.secondary,
@@ -219,21 +221,26 @@ class ContractCard(Container):
             yield line
             yield g
 
+    def on_mount(self) -> None:
+        self.update(self._contract)
+
     def update(self, c: dict) -> None:
-        if not hasattr(self, "faction_w"):
-            return
+        self._contract = c
+        if not hasattr(self, "head_w"):
+            return  # not composed yet; on_mount will apply
         self.border_title = c.get("id", "")[:18]
-        self.faction_w.update(Text.assemble((c.get("factionSymbol", ""), PAL.accent)))
-        self.type_w.update(
+        status = (
+            "✓ DONE"
+            if c.get("fulfilled")
+            else ("ACCEPTED" if c.get("accepted") else "PENDING")
+        )
+        self.head_w.update(
             Text.assemble(
+                (c.get("factionSymbol", ""), PAL.accent),
+                (" · ", PAL.text_muted),
                 (c.get("type", ""), PAL.text_dim),
-                ("  ", PAL.text_muted),
-                (
-                    "✓ DONE"
-                    if c.get("fulfilled")
-                    else ("ACCEPTED" if c.get("accepted") else "PENDING"),
-                    PAL.success if c.get("fulfilled") else PAL.secondary,
-                ),
+                (" · ", PAL.text_muted),
+                (status, PAL.success if c.get("fulfilled") else PAL.secondary),
             )
         )
         terms = c.get("terms", {})
@@ -267,43 +274,61 @@ class ContractCard(Container):
 
 
 class BotRow(Container):
+    """One ship's automation controls: pick a bot type, start/stop, live status."""
+
+    KINDS = ["mine", "trade", "contract", "probe"]
+
     class Toggle(Message):
-        def __init__(self, symbol: str) -> None:
+        def __init__(self, symbol: str, kind: str) -> None:
             self.symbol = symbol
+            self.kind = kind
             super().__init__()
 
-    def __init__(self, ship: dict, **kw):
+    def __init__(self, ship: dict, kind: str = "mine", **kw):
         super().__init__(classes="bot-row", **kw)
         self.symbol = ship["symbol"]
+        self.kind = kind if kind in self.KINDS else "mine"
+        self.running = False
 
     def compose(self):
         with Horizontal(classes="bot-head"):
             yield Static(self.symbol, classes="bot-name")
             self.status = Pill("IDLE", "idle")
             yield self.status
-        self.mode_w = Static("", classes="bot-mode")
-        yield self.mode_w
         self.last_w = Static("idle", classes="bot-last")
         yield self.last_w
         with Horizontal(classes="bot-controls"):
-            yield Button("Start", id=f"bot-start-{self.symbol}", classes="btn --primary")
-            yield Button("Stop", id=f"bot-stop-{self.symbol}", classes="btn --danger", disabled=True)
+            self.kind_btn = Button(
+                f"◇ {self.kind}", id=f"bot-kind-{self.symbol}", classes="btn --ghost"
+            )
+            yield self.kind_btn
+            yield Button("▶ Start", id=f"bot-start-{self.symbol}", classes="btn --primary")
+            yield Button("■ Stop", id=f"bot-stop-{self.symbol}", classes="btn --danger", disabled=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id and (
-            event.button.id.startswith("bot-start-") or event.button.id.startswith("bot-stop-")
-        ):
-            self.post_message(self.Toggle(self.symbol))
+        bid = event.button.id or ""
+        if bid == f"bot-kind-{self.symbol}":
+            if not self.running:
+                i = self.KINDS.index(self.kind)
+                self.kind = self.KINDS[(i + 1) % len(self.KINDS)]
+                self.kind_btn.label = f"◇ {self.kind}"
+            event.stop()
+        elif bid in (f"bot-start-{self.symbol}", f"bot-stop-{self.symbol}"):
+            self.post_message(self.Toggle(self.symbol, self.kind))
+            event.stop()
 
     def set_state(self, running: bool, last: str = "", mode: str = "") -> None:
+        self.running = running
+        if not hasattr(self, "status"):
+            return  # not composed yet
         self.set_class(running, "--running")
-        self.status.set("RUNNING" if running else "IDLE", "running" if running else "idle")
+        label = (mode or self.kind).upper() if running else "IDLE"
+        self.status.set(label, "running" if running else "idle")
         try:
             self.query_one("#bot-start-" + self.symbol, Button).disabled = running
             self.query_one("#bot-stop-" + self.symbol, Button).disabled = not running
+            self.query_one("#bot-kind-" + self.symbol, Button).disabled = running
         except Exception:
             pass
         if last:
             self.last_w.update(last[:60])
-        if mode:
-            self.mode_w.update(mode)

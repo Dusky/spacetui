@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import re
 import sys
-import time
 from typing import Any
 
 import config
 from api import ApiError, Client
+from navigation import system_of as _system_of
 
 
 # -- formatting helpers -----------------------------------------------------
@@ -23,11 +22,6 @@ def _fmt_ts(ts: str | None) -> str:
 
 def _credits(n: int | float) -> str:
     return f"{int(n):,}c"
-
-
-def _system_of(waypoint: str) -> str:
-    m = re.match(r"^(X1-[A-Z0-9]+)-", waypoint)
-    return m.group(1) if m else waypoint
 
 
 def _wait_seconds(target: str | None, now_field: str | None = None) -> int:
@@ -328,332 +322,149 @@ def cmd_cooldown(args, c: Client) -> None:
         print(f"{args.ship} cooldown {cd.get('remainingSeconds')}s")
 
 
-# -- autopilot --------------------------------------------------------------
-def _await_arrival(c: Client, ship: str) -> dict:
-    s = c.ship(ship)
-    nav = s.get("nav", {})
-    while nav.get("status") == "IN_TRANSIT":
-        secs = _wait_seconds(nav.get("route", {}).get("arrival"))
-        if secs:
-            print(f"  ...{ship} in transit, waiting {secs}s")
-            time.sleep(secs + 1)
-        s = c.ship(ship)
-        nav = s.get("nav", {})
-    return s
+# -- fleet & world commands ---------------------------------------------------
+def cmd_deliver(args, c: Client) -> None:
+    data = c.deliver_contract(args.contract_id, args.ship, args.trade, args.units)
+    print(f"Delivered {args.units} {args.trade}.")
+    show_contract(data.get("contract", data))
 
 
-def _await_cooldown(c: Client, ship: str) -> None:
-    cd = c.cooldown(ship)
-    while cd.get("remainingSeconds"):
-        secs = cd["remainingSeconds"]
-        print(f"  ...{ship} cooldown {secs}s")
-        time.sleep(secs + 1)
-        cd = c.cooldown(ship)
+def cmd_buy_ship(args, c: Client) -> None:
+    data = c.purchase_ship(args.type.upper(), args.waypoint)
+    ship = data.get("ship", {})
+    t = data.get("transaction", {})
+    print(f"Purchased {ship.get('symbol', '?')} for {_credits(t.get('price', 0))}")
 
 
-def _navigate_smart(c: Client, ship: str, waypoint: str, *, prefer_mode: str = "CRUISE") -> dict:
-    """Navigate in CRUISE. Caller must ensure fuel via _ensure_fuel first."""
-    return c.navigate(ship, waypoint)
+def cmd_transfer(args, c: Client) -> None:
+    data = c.transfer(args.from_ship, args.to_ship, args.trade, args.units)
+    cargo = data.get("cargo", {})
+    print(f"Transferred. {args.from_ship} cargo {cargo.get('units')}/{cargo.get('capacity')}")
 
 
-def _ensure_fuel(c: Client, ship: str, system: str, threshold: float = 0.5) -> bool:
-    """Divert to a fuel market and refuel if fuel ratio < threshold.
+def cmd_chart(args, c: Client) -> None:
+    data = c.chart(args.ship)
+    wp = data.get("waypoint", {})
+    print(f"Charted {wp.get('symbol', '?')} ({wp.get('type', '?')})")
 
-    Returns True if a refuel trip was started/done (caller should re-loop).
-    """
-    s = c.ship(ship)
-    nav = s.get("nav", {})
-    if nav.get("status") == "IN_TRANSIT":
-        return False
-    fuel = s.get("fuel", {})
-    cap = fuel.get("capacity", 0)
-    cur = fuel.get("current", 0)
-    if cap == 0 or cur / cap >= threshold:
-        return False
-    target = config.HQ
-    print(f"  fuel low ({cur}/{cap}); diverting to {target} to refuel")
-    if nav.get("waypointSymbol") != target:
-        if nav.get("status") == "DOCKED":
-            c.orbit(ship)
-        try:
-            c.navigate(ship, target)
-        except ApiError as e:
-            if e.code == 4203 or "fuel" in e.message.lower():
-                print("  CRUISE fuel short; using DRIFT to reach fuel station")
-                c.set_flight_mode(ship, "DRIFT")
-                c.navigate(ship, target)
-            else:
-                raise
-        return True
-    if nav.get("status") != "DOCKED":
-        c.dock(ship)
-    _maybe_refuel(c, ship, threshold=0.0)
+
+def cmd_siphon(args, c: Client) -> None:
+    data = c.siphon(args.ship)
+    y = data.get("siphon", {}).get("yield", {})
+    print(f"Siphoned +{y.get('units', 0)} {y.get('symbol', '')}")
+
+
+def cmd_refine(args, c: Client) -> None:
+    data = c.refine(args.ship, args.produce.upper())
+    for p in data.get("produced", []):
+        print(f"Refined +{p.get('units')} {p.get('tradeSymbol')}")
+
+
+def cmd_repair(args, c: Client) -> None:
+    if args.quote:
+        t = c.repair_quote(args.ship).get("transaction", {})
+        print(f"Repair would cost {_credits(t.get('totalPrice', 0))}")
+        return
+    data = c.repair(args.ship)
+    t = data.get("transaction", {})
+    print(f"Repaired {args.ship} for {_credits(t.get('totalPrice', 0))}")
+
+
+def cmd_prices(args, c: Client) -> None:
+    from market import MarketDB
+
+    system = args.system or _system_of(config.HQ)
+    rows = MarketDB().prices(system)
+    if not rows:
+        print(f"No recorded prices for {system}. Run a probe/trader bot or visit markets.")
+        return
+    rows.sort(key=lambda r: (r.good, r.waypoint))
+    print(f"{'GOOD':<24} {'WAYPOINT':<14} {'TYPE':<8} {'BUY':>6} {'SELL':>6}  AGE")
+    now = dt.datetime.now().timestamp()
+    for r in rows:
+        age = int((now - r.ts) / 60)
+        print(
+            f"{r.good:<24} {r.waypoint:<14} {r.type:<8} "
+            f"{r.buy or '-':>6} {r.sell or '-':>6}  {age}m"
+        )
+
+
+def cmd_routes(args, c: Client) -> None:
+    from market import MarketDB, best_routes
+    from navigation import WaypointCache
+
+    system = args.system or _system_of(config.HQ)
+    routes = best_routes(
+        MarketDB(), WaypointCache(c), system, min_margin=args.min_margin
+    )
+    if not routes:
+        print(f"No profitable routes known in {system}. Gather prices first (probe bot).")
+        return
+    print(f"{'GOOD':<24} {'BUY @':<14} {'':>6} {'SELL @':<14} {'':>6} {'+/u':>5} {'dist':>6}")
+    for r in routes[: args.n]:
+        print(
+            f"{r.good:<24} {r.buy_waypoint:<14} {r.buy_price:>6} "
+            f"{r.sell_waypoint:<14} {r.sell_price:>6} {r.margin:>5} {r.dist:>6.0f}"
+        )
+
+
+# -- bots ---------------------------------------------------------------------
+def _run_bot(bot) -> None:
+    import threading
+
+    t = threading.Thread(target=bot.run, daemon=True)
+    t.start()
     try:
-        c.set_flight_mode(ship, "CRUISE")
-    except ApiError:
-        pass
-    return True
-
-
-def _find_waypoint(c: Client, system: str, trait: str) -> dict | None:
-    for w in c.waypoints(system, filters={"traits": trait}):
-        return w
-    return None
-
-
-def _next_rock(c: Client, system: str, avoid: set[str]) -> dict | None:
-    for w in c.waypoints(system, filters={"traits": "MINERAL_DEPOSITS"}):
-        if w["symbol"] not in avoid:
-            return w
-    return None
+        while t.is_alive():
+            t.join(0.5)
+    except KeyboardInterrupt:
+        print("\nstopping bot…")
+        bot.stop()
+        t.join(30)
 
 
 def cmd_autopilot(args, c: Client) -> None:
-    """Mine ore with SHIP and optionally sell / fulfill a procurement contract."""
-    ship = args.ship
-    print(f"Autopilot engaged on {ship}. Ctrl+C to stop.")
-    loops = args.loops
-    iteration = 0
-    surveys: list[dict] = []
-    tried_rocks: set[str] = set()
-    try:
-        while loops is None or iteration < loops:
-            iteration += 1
-            s = _await_arrival(c, ship)
-            nav = s["nav"]
-            system = nav["systemSymbol"]
-            here = nav["waypointSymbol"]
-            cargo = s.get("cargo", {})
-            capacity = cargo.get("capacity", 0)
-            units = cargo.get("units", 0)
+    """Kept for muscle memory: `autopilot` == `bot mine`."""
+    from automation import MinerBot
 
-            # surveys are per-waypoint; drop stale ones after a move
-            surveys = [s for s in surveys if s.get("symbol") == here]
-
-            # keep the tank topped up before doing anything else
-            if _ensure_fuel(c, ship, system):
-                continue
-
-            # decide what to mine for
-            contract = None
-            if args.contract:
-                contract = c.contract(args.contract)
-            desired = None
-            if contract and not contract.get("fulfilled"):
-                for d in contract["terms"]["deliver"]:
-                    if d["unitsFulfilled"] < d["unitsRequired"]:
-                        desired = (d["tradeSymbol"], d["destinationSymbol"])
-                        break
-
-            # if full, go sell / deliver
-            if units >= capacity or (capacity == 0):
-                print(f"[{iteration}] cargo full ({units}/{capacity}); heading to market.")
-                _sell_off(c, ship, system, contract=contract, sell_all=args.sell)
-                continue
-
-            # move to an asteroid field if not at one
-            if not _has_trait(c, system, here, "MINERAL_DEPOSITS"):
-                wp = _find_waypoint(c, system, "MINERAL_DEPOSITS")
-                if not wp:
-                    raise ApiError(0, f"No mineral deposits found in {system}")
-                print(f"[{iteration}] navigating to {wp['symbol']} to mine.")
-                c.dock(ship) if nav["status"] == "DOCKED" else None
-                c.orbit(ship)
-                _navigate_smart(c, ship, wp["symbol"])
-                continue
-
-            # orbit + extract
-            if nav["status"] != "IN_ORBIT":
-                c.orbit(ship)
-            _await_cooldown(c, ship)
-
-            desired_good = desired[0] if desired else None
-            if desired_good and not surveys:
-                try:
-                    surveys = c.survey(ship)
-                    _await_cooldown(c, ship)
-                    hits = [
-                        f"{s['symbol']}:{','.join(d['symbol'] for d in s.get('deposits',[]))}"
-                        for s in surveys
-                    ]
-                    print(f"[{iteration}] surveyed {here}: {hits}")
-                except ApiError as e:
-                    print(f"[{iteration}] survey unavailable: {e.message}")
-
-            # relocate if desired good isn't present at this rock
-            if desired_good and surveys:
-                has_good = any(
-                    d.get("symbol") == desired_good
-                    for sv in surveys
-                    for d in sv.get("deposits", [])
-                )
-                if not has_good:
-                    tried_rocks.add(here)
-                    nxt = _next_rock(c, system, avoid=tried_rocks)
-                    if nxt:
-                        print(
-                            f"[{iteration}] no {desired_good} at {here}; "
-                            f"relocating to {nxt['symbol']}"
-                        )
-                        if nav["status"] != "IN_ORBIT":
-                            c.orbit(ship)
-                        _navigate_smart(c, ship, nxt["symbol"])
-                        surveys = []
-                        continue
-                    print(f"[{iteration}] no {desired_good} in surveyed rocks; mining raw.")
-                    surveys = []
-                else:
-                    tried_rocks.discard(here)
-
-            chosen = _pick_survey(surveys, desired_good)
-            label = f" (survey {chosen['symbol']})" if chosen else ""
-            print(f"[{iteration}] extracting at {here}{label} ({capacity-units} free)")
-            try:
-                data = c.extract(ship, survey=chosen)
-            except ApiError as e:
-                if chosen and e.code in (4221, 4222, 4044):
-                    surveys = [s for s in surveys if s.get("signature") != chosen.get("signature")]
-                    print(f"[{iteration}] survey stale/exhausted, retrying.")
-                    continue
-                if e.code == 4228 or "cargo" in e.message.lower():
-                    print(f"[{iteration}] cargo full, going to sell.")
-                    _sell_off(c, ship, system, contract=contract, sell_all=args.sell)
-                    continue
-                raise
-            y = data.get("extraction", {}).get("yield", {})
-            cd = data.get("cooldown", {})
-            print(
-                f"[{iteration}] +{y.get('units',0)} {y.get('symbol','')} "
-                f"(cooldown {cd.get('totalSeconds',0)}s)"
-            )
-            if desired_good and y.get("symbol") != desired_good and chosen:
-                # survey yielded a different deposit than hoped; drop it to try a better one
-                surveys = [s for s in surveys if s.get("signature") != chosen.get("signature")]
-    except KeyboardInterrupt:
-        print("\nAutopilot disengaged.")
+    bot = MinerBot(
+        c,
+        args.ship,
+        contract=args.contract,
+        sell=args.sell,
+        max_cycles=args.loops,
+        on_log=print,
+    )
+    print(f"Autopilot (miner) engaged on {args.ship}. Ctrl+C to stop.")
+    _run_bot(bot)
 
 
-def _has_trait(c: Client, system: str, waypoint: str, trait: str) -> bool:
-    w = c.waypoint(system, waypoint)
-    return any(t["symbol"] == trait for t in w.get("traits", []))
+def cmd_bot(args, c: Client) -> None:
+    from automation import BOT_TYPES
+
+    cls = BOT_TYPES[args.kind]
+    kw: dict[str, Any] = {"on_log": print, "max_cycles": args.loops}
+    if args.kind == "mine":
+        kw["contract"] = args.contract
+    if args.kind == "trade":
+        kw["min_margin"] = args.min_margin
+    bot = cls(c, args.ship, **kw)
+    print(f"{cls.name} bot engaged on {args.ship}. Ctrl+C to stop.")
+    _run_bot(bot)
 
 
-def _pick_survey(surveys: list[dict], desired_good: str | None) -> dict | None:
-    """Choose the survey most likely to yield desired_good (largest matching deposit)."""
-    if not surveys:
-        return None
-    if not desired_good:
-        return surveys[0]
-    best: dict | None = None
-    best_size = -1
-    for sv in surveys:
-        for d in sv.get("deposits", []):
-            if d.get("symbol") == desired_good and d.get("size") is not None:
-                size_rank = {"SMALL": 1, "MODERATE": 2, "LARGE": 3, "RICH": 4}.get(
-                    d.get("size", ""), 0
-                )
-                if size_rank > best_size:
-                    best, best_size = sv, size_rank
-    return best or surveys[0]
+def cmd_fleet(args, c: Client) -> None:
+    from automation import FleetCommander
 
-
-def _sell_off(c: Client, ship: str, system: str, *, contract: dict | None, sell_all: bool):
-    s = _await_arrival(c, ship)
-    nav = s["nav"]
-    cargo = s.get("cargo", {})
-    inv = cargo.get("inventory", [])
-
-    # 1) deliver contract goods first
-    if contract and not contract.get("fulfilled"):
-        dest = None
-        deliver_goods = {}
-        for d in contract["terms"]["deliver"]:
-            need = d["unitsRequired"] - d["unitsFulfilled"]
-            if need > 0 and d["tradeSymbol"] in {i["symbol"] for i in inv}:
-                deliver_goods[d["tradeSymbol"]] = (min(need, _inv_units(inv, d["tradeSymbol"])), d["destinationSymbol"])
-        for good, (units, destination) in deliver_goods.items():
-            print(f"  delivering {units} {good} -> {destination}")
-            if nav["waypointSymbol"] != destination:
-                c.dock(ship) if nav["status"] == "DOCKED" else None
-                if nav["status"] != "IN_ORBIT":
-                    c.orbit(ship)
-                _navigate_smart(c, ship, destination)
-                s = _await_arrival(c, ship)
-                nav = s["nav"]
-            c.dock(ship)
-            # Need to be docked to deliver via sell to contract destination
-            c.sell(ship, good, units)
-            nav = {"waypointSymbol": destination, "status": "DOCKED"}
-            print(f"  delivered {units} {good} to {destination}")
-
-    # 2) sell remaining cargo at best marketplace
-    s = _await_arrival(c, ship)
-    s = c.ship(ship)
-    inv = s.get("cargo", {}).get("inventory", [])
-    if not inv:
-        print("  cargo empty.")
-        return
-    market_wp = _find_market(c, system)
-    if not market_wp:
-        print(f"  no marketplace in {system}; can't sell.")
-        return
-    if s["nav"]["waypointSymbol"] != market_wp["symbol"]:
-        if s["nav"]["status"] != "IN_ORBIT":
-            c.orbit(ship)
-        print(f"  navigating to market {market_wp['symbol']}")
-        _navigate_smart(c, ship, market_wp["symbol"])
-        s = _await_arrival(c, ship)
-    c.dock(ship)
-    _maybe_refuel(c, ship)
-    for item in inv:
-        units = item["units"]
-        if units <= 0:
-            continue
-        try:
-            data = c.sell(ship, item["symbol"], units)
-            t = data.get("transaction", {})
-            print(f"  sold {units} {item['symbol']} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
-        except ApiError as e:
-            print(f"  ! couldn't sell {item['symbol']}: {e.message}")
-
-
-def _inv_units(inv: list[dict], symbol: str) -> int:
-    for i in inv:
-        if i["symbol"] == symbol:
-            return i["units"]
-    return 0
-
-
-def _find_market(c: Client, system: str) -> dict | None:
-    for w in c.waypoints(system, filters={"traits": "MARKETPLACE"}):
-        return w
-    return None
-
-
-def _maybe_refuel(c: Client, ship: str, threshold: float = 0.4) -> None:
-    s = c.ship(ship)
-    nav = s.get("nav", {})
-    fuel = s.get("fuel", {})
-    if nav.get("status") != "DOCKED":
-        return
-    cap = fuel.get("capacity", 0)
-    if cap == 0:
-        return
-    if fuel.get("current", 0) / cap >= threshold:
-        return
-    try:
-        data = c.refuel(ship)
-        t = data.get("transaction", {})
-        print(
-            f"  refueled {ship} +{t.get('units',0)} fuel for "
-            f"{t.get('totalPrice',0)}c (credits {data.get('agent', {}).get('credits')})"
-        )
-        try:
-            c.set_flight_mode(ship, "CRUISE")
-        except ApiError:
-            pass
-    except ApiError as e:
-        print(f"  refuel skipped: {e.message}")
+    cmdr = FleetCommander(
+        c,
+        autobuy=args.autobuy.upper() if args.autobuy else None,
+        autobuy_reserve=args.reserve,
+        max_ships=args.max_ships,
+        on_log=print,
+    )
+    print("Fleet commander engaged (role-based bots per ship). Ctrl+C to stop.")
+    _run_bot(cmdr)
 
 
 # -- entry ------------------------------------------------------------------
@@ -768,6 +579,67 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sell", action="store_true", help="sell non-contract cargo at market")
     sp.add_argument("--loops", type=int, help="stop after N extract cycles")
     sp.set_defaults(func=cmd_autopilot)
+
+    sp = sub.add_parser("deliver", help="deliver contract goods from a docked ship")
+    sp.add_argument("contract_id")
+    sp.add_argument("ship")
+    sp.add_argument("trade")
+    sp.add_argument("units", type=int)
+    sp.set_defaults(func=cmd_deliver)
+
+    sp = sub.add_parser("buy-ship", help="purchase a ship at a shipyard waypoint")
+    sp.add_argument("type", help="e.g. SHIP_MINING_DRONE")
+    sp.add_argument("waypoint")
+    sp.set_defaults(func=cmd_buy_ship)
+
+    sp = sub.add_parser("transfer", help="transfer cargo between two ships")
+    sp.add_argument("from_ship")
+    sp.add_argument("to_ship")
+    sp.add_argument("trade")
+    sp.add_argument("units", type=int)
+    sp.set_defaults(func=cmd_transfer)
+
+    sp = sub.add_parser("chart", help="chart the current waypoint")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_chart)
+
+    sp = sub.add_parser("siphon", help="siphon gas at a gas giant")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_siphon)
+
+    sp = sub.add_parser("refine", help="refine raw goods aboard a refinery ship")
+    sp.add_argument("ship")
+    sp.add_argument("produce", help="e.g. IRON, COPPER, FUEL")
+    sp.set_defaults(func=cmd_refine)
+
+    sp = sub.add_parser("repair", help="repair a ship at a shipyard")
+    sp.add_argument("ship")
+    sp.add_argument("--quote", action="store_true", help="show cost only")
+    sp.set_defaults(func=cmd_repair)
+
+    sp = sub.add_parser("prices", help="show recorded market prices for a system")
+    sp.add_argument("system", nargs="?")
+    sp.set_defaults(func=cmd_prices)
+
+    sp = sub.add_parser("routes", help="best known trade routes in a system")
+    sp.add_argument("system", nargs="?")
+    sp.add_argument("--min-margin", type=int, default=1)
+    sp.add_argument("-n", type=int, default=15, help="show top N")
+    sp.set_defaults(func=cmd_routes)
+
+    sp = sub.add_parser("bot", help="run an autonomous bot on one ship")
+    sp.add_argument("kind", choices=["mine", "trade", "contract", "probe"])
+    sp.add_argument("ship")
+    sp.add_argument("--contract", help="(mine) contract id to work")
+    sp.add_argument("--min-margin", type=int, default=2, help="(trade) min profit/unit")
+    sp.add_argument("--loops", type=int, help="stop after N cycles")
+    sp.set_defaults(func=cmd_bot)
+
+    sp = sub.add_parser("fleet", help="run role-based bots on every ship")
+    sp.add_argument("--autobuy", help="ship type to buy with spare credits, e.g. SHIP_MINING_DRONE")
+    sp.add_argument("--reserve", type=int, default=50_000, help="credits to keep before autobuy")
+    sp.add_argument("--max-ships", type=int, default=10)
+    sp.set_defaults(func=cmd_fleet)
 
     return p
 
