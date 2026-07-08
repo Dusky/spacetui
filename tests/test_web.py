@@ -120,3 +120,20 @@ def test_bot_start_and_stop(app):
     assert "MDOE-1" in app.hub.bots
     c.post("/api/bot", json={"ship": "MDOE-1", "kind": "stop"})
     assert "MDOE-1" not in app.hub.bots
+
+
+def test_token_auth_blocks_and_allows():
+    app = create_app(FakeClient(), start_poller=False, token="sekret")
+    app.hub.refresh()
+    c = app.test_client()
+    # no token -> API blocked, page shows the hint
+    assert c.get("/api/state").status_code == 401
+    assert c.get("/").status_code == 401
+    # header token -> allowed
+    assert c.get("/api/state", headers={"X-Auth-Token": "sekret"}).status_code == 200
+    # a valid ?token on the page sets a cookie and redirects
+    r = c.get("/?token=sekret")
+    assert r.status_code == 302
+    assert any(ck.startswith("st_token=sekret") for ck in r.headers.getlist("Set-Cookie"))
+    # cookie now carries auth for subsequent API calls
+    assert c.get("/api/state").status_code == 200

@@ -150,10 +150,21 @@ def cmd_setup(args) -> None:
 
 
 def cmd_web(args) -> None:
+    import secrets
+
     from web.server import create_app
 
-    app = create_app()
-    print(f"spacetui web dashboard on http://{args.host}:{args.port}")
+    token = args.token
+    # never expose the control API on a non-local interface without auth
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not token:
+        token = secrets.token_urlsafe(12)
+    app = create_app(token=token)
+    url = f"http://{args.host}:{args.port}/"
+    if token:
+        url += f"?token={token}"
+    print(f"spacetui web dashboard on {url}")
+    if token:
+        print("  (token auth on — open the URL above; it sets a cookie for this device)")
     app.run(host=args.host, port=args.port, threaded=True)
 
 
@@ -901,8 +912,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_setup, raw=True)
 
     sp = sub.add_parser("web", help="serve the web dashboard (browser UI)")
-    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 for LAN/phone access")
     sp.add_argument("--port", type=int, default=8000)
+    sp.add_argument("--token", help="require this token (auto-generated for non-local hosts)")
     sp.set_defaults(func=cmd_web, raw=True)
 
     sp = sub.add_parser("register", help="register a new agent (uses account token)")

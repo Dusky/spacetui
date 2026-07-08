@@ -84,6 +84,11 @@ background poller refreshes a cached snapshot, so opening it in a browser adds n
 SpaceTraders API traffic; every call still funnels through the shared rate
 limiter. Binds to `127.0.0.1` by default (`--host` / `--port` to change).
 
+**Phone / LAN access:** `st.py web --host 0.0.0.0` exposes it on your network.
+A token is required for non-local hosts (auto-generated and printed, or set your
+own with `--token`); open the printed `http://<ip>:8000/?token=...` link once and
+it sets a cookie for that device. Localhost needs no token.
+
 ## Layout
 
 ```

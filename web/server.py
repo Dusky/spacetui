@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 
 import config
 import store
@@ -14,13 +14,40 @@ from .hub import Hub
 _STATIC = Path(__file__).resolve().parent / "static"
 
 
-def create_app(client: Client | None = None, *, start_poller: bool = True) -> Flask:
+def create_app(
+    client: Client | None = None, *, start_poller: bool = True, token: str | None = None
+) -> Flask:
     app = Flask(__name__, static_folder=None)
     hub = Hub(client or Client(token=config.require_agent_token()))
     app.hub = hub  # exposed for tests
     if start_poller:
         hub.refresh()
         hub.start_poller()
+
+    # -- optional token auth (for LAN / phone access) ----------------------
+    def _authorized() -> bool:
+        return token in (
+            request.headers.get("X-Auth-Token"),
+            request.cookies.get("st_token"),
+            request.args.get("token"),
+        )
+
+    @app.before_request
+    def _guard():
+        if not token:
+            return None
+        # a valid ?token on the page load sets a cookie, then drops the query so
+        # the token doesn't linger in the URL / history
+        if (request.path == "/" and request.args.get("token") == token
+                and request.cookies.get("st_token") != token):
+            resp = redirect("/")
+            resp.set_cookie("st_token", token, httponly=True, samesite="Lax")
+            return resp
+        if _authorized():
+            return None
+        if request.path == "/":
+            return ("Unauthorized. Open this page with ?token=YOUR_TOKEN appended.", 401)
+        return jsonify({"error": "unauthorized"}), 401
 
     # -- static SPA --------------------------------------------------------
     @app.get("/")
