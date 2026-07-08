@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import queue
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 
 import config
 import store
@@ -66,6 +68,27 @@ def create_app(
     @app.get("/api/log")
     def api_log():
         return jsonify(hub.log_lines(int(request.args.get("limit", 100))))
+
+    @app.get("/api/stream")
+    def api_stream():
+        def _sse(event, data):
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        def gen():
+            q = hub.subscribe()
+            try:
+                yield _sse("state", hub.snapshot())  # prime the client
+                while True:
+                    try:
+                        item = q.get(timeout=15)
+                        yield _sse(item["event"], item["data"])
+                    except queue.Empty:
+                        yield ": ping\n\n"  # heartbeat keeps the connection open
+            finally:
+                hub.unsubscribe(q)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/deals")
     def api_deals():

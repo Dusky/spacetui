@@ -9,6 +9,7 @@ SpaceTraders traffic; every real call still funnels through the shared limiter.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from collections import deque
@@ -38,11 +39,37 @@ class Hub:
         self._log: deque = deque(maxlen=300)
         self._poller: threading.Thread | None = None
         self._stop = threading.Event()
+        self._subs: set = set()  # SSE subscriber queues
+
+    # -- pub/sub (Server-Sent Events) --------------------------------------
+    def subscribe(self) -> "queue.Queue":
+        q: queue.Queue = queue.Queue(maxsize=200)
+        with self._lock:
+            self._subs.add(q)
+        return q
+
+    def unsubscribe(self, q) -> None:
+        with self._lock:
+            self._subs.discard(q)
+
+    def _publish(self, event: str, data) -> None:
+        with self._lock:
+            subs = list(self._subs)
+        for q in subs:
+            try:
+                q.put_nowait({"event": event, "data": data})
+            except queue.Full:
+                pass
+
+    def _push_state(self) -> None:
+        self._publish("state", self.snapshot())
 
     # -- logging -----------------------------------------------------------
     def log(self, msg: str) -> None:
+        line = {"t": time.strftime("%H:%M:%S"), "msg": msg}
         with self._lock:
-            self._log.append({"t": time.strftime("%H:%M:%S"), "msg": msg})
+            self._log.append(line)
+        self._publish("log", line)
 
     def log_lines(self, limit: int = 100) -> list[dict]:
         with self._lock:
@@ -70,6 +97,7 @@ class Hub:
             store.record_credits(agent.get("credits", 0), agent.get("shipCount", 0))
         except Exception:
             pass
+        self._push_state()
 
     def start_poller(self, interval: float = 5.0) -> None:
         if self._poller and self._poller.is_alive():
@@ -129,12 +157,14 @@ class Hub:
         self.bots[ship] = bot
         threading.Thread(target=bot.run, daemon=True, name=f"web-bot-{ship}").start()
         self.log(f"{ship} {kind} bot started")
+        self._push_state()
 
     def stop_bot(self, ship: str) -> None:
         bot = self.bots.pop(ship, None)
         if bot:
             bot.stop()
             self.log(f"{ship} bot stopped")
+        self._push_state()
 
     # -- orchestrator ------------------------------------------------------
     def start_orch(self, opts: dict) -> None:
@@ -150,11 +180,13 @@ class Hub:
         )
         self.orchestrator.start()
         self.log("orchestrator started")
+        self._push_state()
 
     def stop_orch(self) -> None:
         if self.orchestrator:
             self.orchestrator.stop()
             self.log("orchestrator stopped")
+        self._push_state()
 
     # -- one-shot actions --------------------------------------------------
     def fleet_action(self, ship: str, kind: str, waypoint: str = "") -> dict:

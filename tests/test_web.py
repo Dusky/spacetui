@@ -122,6 +122,39 @@ def test_bot_start_and_stop(app):
     assert "MDOE-1" not in app.hub.bots
 
 
+def test_stream_pubsub(app):
+    hub = app.hub
+    q = hub.subscribe()
+    hub.log("hello world")
+    item = q.get(timeout=1)
+    assert item["event"] == "log" and item["data"]["msg"] == "hello world"
+    hub.refresh()  # publishes a state snapshot
+    seen = []
+    while True:
+        try:
+            seen.append(q.get(timeout=0.3))
+        except Exception:
+            break
+    assert any(e["event"] == "state" for e in seen)
+    hub.unsubscribe(q)
+    assert q not in hub._subs
+
+
+def test_control_actions_push_state(app):
+    hub = app.hub
+    q = hub.subscribe()
+    app.test_client().post("/api/bot", json={"ship": "MDOE-1", "kind": "trade"})
+    events = []
+    while True:
+        try:
+            events.append(q.get(timeout=0.3))
+        except Exception:
+            break
+    assert any(e["event"] == "state" for e in events)  # UI updates without waiting for a poll
+    hub.stop_bot("MDOE-1")
+    hub.unsubscribe(q)
+
+
 def test_token_auth_blocks_and_allows():
     app = create_app(FakeClient(), start_poller=False, token="sekret")
     app.hub.refresh()

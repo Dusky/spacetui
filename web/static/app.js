@@ -304,10 +304,16 @@ async function vAnalytics() {
   if (!rows.length) pb.innerHTML = `<span class="muted">no trades recorded yet</span>`;
 }
 
-async function refreshLog() {
+let logBuf = [];
+function pushLog(line) {
+  logBuf.push(line); if (logBuf.length > 300) logBuf.shift();
   const box = $("#log"); if (!box) return;
-  const lines = await getJSON("/api/log?limit=100");
-  box.innerHTML = lines.map(l => `<div class="line"><span class="t">${l.t}</span>${l.msg}</div>`).join("");
+  const d = el("div", "line"); d.innerHTML = `<span class="t">${line.t}</span>${line.msg}`;
+  box.appendChild(d); box.scrollTop = box.scrollHeight;
+}
+function refreshLog() {
+  const box = $("#log"); if (!box) return;
+  box.innerHTML = logBuf.map(l => `<div class="line"><span class="t">${l.t}</span>${l.msg}</div>`).join("");
   box.scrollTop = box.scrollHeight;
 }
 
@@ -317,11 +323,26 @@ function render() {
      automation: vAutomation, analytics: vAnalytics }[view] || vOverview)();
 }
 
-/* ---------- poll loop ---------- */
+/* ---------- live updates (SSE, with polling fallback) ---------- */
+function applyState(s) { state = s; updateChrome(); render(); }
 async function poll() {
-  try { state = await getJSON("/api/state"); updateChrome(); render(); }
-  catch (e) { /* keep last */ }
+  try { applyState(await getJSON("/api/state")); } catch (e) { /* keep last */ }
 }
-buildNav();
-poll();
-setInterval(poll, 4000);
+let pollTimer = null;
+function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 4000); } }
+
+function connect() {
+  let es;
+  try { es = new EventSource("/api/stream"); } catch (e) { startPolling(); return; }
+  es.addEventListener("state", e => applyState(JSON.parse(e.data)));
+  es.addEventListener("log", e => pushLog(JSON.parse(e.data)));
+  es.onopen = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+  es.onerror = () => { /* browser retries the stream; poll meanwhile */ startPolling(); };
+}
+
+async function boot() {
+  buildNav();
+  try { logBuf = await getJSON("/api/log?limit=100"); } catch (e) { logBuf = []; }
+  connect();
+}
+boot();
