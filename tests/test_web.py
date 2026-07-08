@@ -44,6 +44,15 @@ class FakeClient:
     def orbit(self, s):
         self.calls.append(("orbit", s)); return {"nav": {}}
 
+    def waypoints(self, system, filters=None):
+        self.calls.append(("waypoints", system))
+        return [
+            {"symbol": "X1-AF2-A1", "type": "PLANET", "x": 10, "y": 5,
+             "traits": [{"symbol": "MARKETPLACE"}]},
+            {"symbol": "X1-AF2-B2", "type": "ASTEROID_FIELD", "x": -8, "y": 12,
+             "traits": [{"symbol": "MINERAL_DEPOSITS"}]},
+        ]
+
 
 @pytest.fixture
 def app():
@@ -199,6 +208,35 @@ def test_setup_flow(monkeypatch, tmp_path):
 
 def test_state_has_configured_flag(app):
     assert app.test_client().get("/api/state").get_json()["configured"] is True
+
+
+def test_system_map_endpoint_and_cache(app):
+    c = app.test_client()
+    r = c.get("/api/system/X1-AF2").get_json()
+    assert r["system"] == "X1-AF2"
+    syms = {w["symbol"] for w in r["waypoints"]}
+    assert syms == {"X1-AF2-A1", "X1-AF2-B2"}
+    a1 = next(w for w in r["waypoints"] if w["symbol"] == "X1-AF2-A1")
+    assert a1["x"] == 10 and "MARKETPLACE" in a1["traits"]
+    n = sum(1 for x in app.hub.c.calls if x[0] == "waypoints")
+    c.get("/api/system/X1-AF2")  # second call is cached
+    assert sum(1 for x in app.hub.c.calls if x[0] == "waypoints") == n
+
+
+def test_price_series_endpoint(app):
+    conn = store.connect()
+    for buy, sell in [(100, 90), (110, 100)]:
+        store.record_market({"symbol": "X1-AF2-A1", "tradeGoods": [
+            {"symbol": "GOLD", "type": "EXCHANGE", "purchasePrice": buy,
+             "sellPrice": sell, "tradeVolume": 10}]}, conn=conn)
+    r = app.test_client().get("/api/price/GOLD").get_json()
+    assert [x["sell_price"] for x in r] == [90, 100]
+
+
+def test_stats_credits_have_timestamps(app):
+    store.record_credits(123456, 1)
+    credits = app.test_client().get("/api/stats").get_json()["credits"]
+    assert credits and "t" in credits[0] and "v" in credits[0]
 
 
 def test_token_auth_blocks_and_allows():

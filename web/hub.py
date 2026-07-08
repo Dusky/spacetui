@@ -40,6 +40,24 @@ class Hub:
         self._poller: threading.Thread | None = None
         self._stop = threading.Event()
         self._subs: set = set()  # SSE subscriber queues
+        self._wp_cache: dict[str, tuple[list, float]] = {}  # system -> (waypoints, ts)
+
+    # -- system waypoints (cached; the map view reads these) ---------------
+    def system_waypoints(self, system: str, max_age: float = 600.0) -> list[dict]:
+        hit = self._wp_cache.get(system)
+        if hit and time.time() - hit[1] < max_age:
+            return hit[0]
+        wps = []
+        for w in self.c.waypoints(system):
+            wps.append({
+                "symbol": w.get("symbol"),
+                "type": w.get("type"),
+                "x": w.get("x", 0),
+                "y": w.get("y", 0),
+                "traits": [t.get("symbol") for t in w.get("traits", [])],
+            })
+        self._wp_cache[system] = (wps, time.time())
+        return wps
 
     # -- pub/sub (Server-Sent Events) --------------------------------------
     def subscribe(self) -> "queue.Queue":

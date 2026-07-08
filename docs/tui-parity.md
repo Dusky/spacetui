@@ -36,6 +36,17 @@ checklist item here in the same commit. Check it off when the TUI gains it.
   prompt (`ensure_onboarded`), which works fine — an in-TUI Textual screen would
   only be a polish upgrade. Low priority.
 
+## Web-only (not TUI debt)
+
+These are web-native rich views the TUI is not expected to match:
+
+- **System map** — a canvas map of the current system (waypoints by x/y, ship
+  positions + in-transit routes, click-to-send). Spatial; impractical in a TUI.
+- **Price-history drill-down** — click a watchlist good for a buy/sell-over-time
+  chart with hover tooltips.
+- **Interactive net-worth chart** — hover crosshair + value/time tooltip.
+- **Richer ship detail** — cargo manifest, mounts, route/ETA in one panel.
+
 ## Notes
 
 - Backend modules (`api`, `store`, `arbitrage`, `routing`, `fleet`,

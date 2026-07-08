@@ -98,7 +98,21 @@ input {
 .bar { height: 12px; border-radius: 3px; background: var(--green); }
 .bar.neg { background: var(--danger); }
 canvas { display: block; width: 100%; }
-.spark { height: 22px; }
+.spark { height: 22px; width: 120px; }
+
+/* floating chart/map tooltip */
+#chart-tip {
+  position: fixed; z-index: 50; display: none; pointer-events: none;
+  background: #0c1322; border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 9px; font-size: 12px; color: var(--text); white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0,0,0,.5);
+}
+#mapcanvas { cursor: default; }
+#map-pop {
+  position: absolute; z-index: 20; min-width: 160px;
+  background: #0c1322; border: 1px solid var(--cyan); border-radius: 8px;
+  padding: 10px 12px; box-shadow: 0 6px 18px rgba(0,0,0,.6);
+}
 
 /* log console */
 #log { background: #0c1322; border: 1px solid var(--border); border-radius: 8px; padding: 10px;

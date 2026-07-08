@@ -84,7 +84,8 @@ In the TUI, the **Automate** pane has an *Orchestrate Fleet* button that does th
 ## Web dashboard
 
 `st.py web` serves a browser dashboard (Flask) that mirrors the TUI — Overview,
-Fleet, Contracts, Markets, Automation, and Analytics — with live controls
+Fleet, Contracts, Markets, an interactive system **Map**, Automation, and
+Analytics (with price-history drill-down and a hoverable net-worth chart) — with live controls
 (start/stop the orchestrator and per-ship bots, run fleet actions). A single
 background poller refreshes a cached snapshot, so opening it in a browser adds no
 SpaceTraders API traffic; every call still funnels through the shared rate

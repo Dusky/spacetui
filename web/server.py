@@ -158,13 +158,31 @@ def create_app(
                 watch.append({"good": sym, "last": sells[-1],
                               "delta": sells[-1] - sells[0], "spark": sells})
         return jsonify({
-            "credits": [r["credits"] for r in store.credit_series(limit=400)],
+            "credits": [{"t": r["observed_at"], "v": r["credits"]}
+                        for r in store.credit_series(limit=400)],
             "pnl": store.pnl_summary(),
             "pnl_by_good": store.pnl_by_good(limit=8),
             "activity": store.activity_breakdown(),
             "watchlist": watch,
             "routes": store.best_routes(min_profit=1, max_hops=0)[:10],
         })
+
+    @app.get("/api/price/<good>")
+    def api_price(good):
+        return jsonify(store.price_series(good, limit=300))
+
+    @app.get("/api/system/<system>")
+    def api_system(system):
+        if hub() is None:
+            return jsonify({"error": "not configured"}), 409
+        try:
+            wps = hub().system_waypoints(system)
+        except Exception as e:  # noqa
+            return jsonify({"error": str(e)}), 502
+        # jump-gate links originating in this system (for drawing)
+        links = [{"from": e["from_gate"], "to": e["to_gate"], "to_system": e["to_system"]}
+                 for e in store.jump_edges() if e["from_system"] == system]
+        return jsonify({"system": system, "waypoints": wps, "links": links})
 
     @app.get("/api/market/<waypoint>")
     def api_market(waypoint):
