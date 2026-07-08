@@ -149,6 +149,14 @@ def cmd_setup(args) -> None:
     onboarding.run_wizard()
 
 
+def cmd_web(args) -> None:
+    from web.server import create_app
+
+    app = create_app()
+    print(f"spacetui web dashboard on http://{args.host}:{args.port}")
+    app.run(host=args.host, port=args.port, threaded=True)
+
+
 def cmd_register(args) -> None:
     data = Client.register(args.symbol.upper(), args.faction.upper())
     token = data["token"]
@@ -891,6 +899,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("setup", help="first-run setup: get an agent token and write .env")
     sp.set_defaults(func=cmd_setup, raw=True)
+
+    sp = sub.add_parser("web", help="serve the web dashboard (browser UI)")
+    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=8000)
+    sp.set_defaults(func=cmd_web, raw=True)
 
     sp = sub.add_parser("register", help="register a new agent (uses account token)")
     sp.add_argument("symbol")

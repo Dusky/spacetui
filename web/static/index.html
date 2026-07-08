@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SpaceTraders · Nebula HUD</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">◢◣ SPACETRADERS</div>
+      <div class="brand-sub">v2 · nebula hud · web</div>
+      <nav id="nav"></nav>
+      <div class="agent-mini">
+        <div>credits <span id="mini-credits">—</span></div>
+        <div>hq <span id="mini-hq">—</span></div>
+        <div>ships <span id="mini-ships">—</span></div>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+  <div id="statusbar">
+    <span id="sb-agent" class="hot">—</span>
+    <span id="sb-credits" class="green">— c</span>
+    <span id="sb-hq">—</span>
+    <span id="sb-poll" class="green">● connecting</span>
+    <span id="sb-bots" class="gold">bots 0</span>
+    <span id="sb-clock" class="right">--:--:--</span>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

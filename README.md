@@ -38,6 +38,9 @@ ST_AGENT_TOKEN=<agent token, obtained after /register>
 ## Run
 
 ```bash
+# Web dashboard (browser UI)
+.venv/bin/python st.py web            # http://127.0.0.1:8000
+
 # TUI
 .venv/bin/python -m tui
 
@@ -72,6 +75,15 @@ Ship roles are chosen automatically:
 
 In the TUI, the **Automate** pane has an *Orchestrate Fleet* button that does the same.
 
+## Web dashboard
+
+`st.py web` serves a browser dashboard (Flask) that mirrors the TUI — Overview,
+Fleet, Contracts, Markets, Automation, and Analytics — with live controls
+(start/stop the orchestrator and per-ship bots, run fleet actions). A single
+background poller refreshes a cached snapshot, so opening it in a browser adds no
+SpaceTraders API traffic; every call still funnels through the shared rate
+limiter. Binds to `127.0.0.1` by default (`--host` / `--port` to change).
+
 ## Layout
 
 ```
@@ -82,6 +94,8 @@ arbitrage.py    pure same/cross-system route scanner
 routing.py      pure jump-gate graph + pathfinding
 fleet.py        ship purchasing + FleetManager
 orchestrator.py Fleet Orchestrator (classify → deploy → reinvest)
+claims.py       route claims so traders don't stampede one deal
 onboarding.py   first-run setup wizard
 tui/            Textual TUI (app, widgets, views, bots, charts, theme)
+web/            Flask web dashboard (server, hub, static SPA)
 ```

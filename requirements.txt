@@ -1,6 +1,7 @@
 requests>=2.31
 textual>=0.40
 rich>=13
+flask>=3
 
 # dev / test
 pytest>=7
