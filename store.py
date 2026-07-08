@@ -17,7 +17,8 @@ import threading
 import time
 from pathlib import Path
 
-from arbitrage import arbitrage_scan
+from arbitrage import arbitrage_scan, cross_system_scan
+from routing import build_graph, system_of as _sys_of
 
 DB_PATH = os.environ.get(
     "ST_DB_PATH", str(Path(__file__).resolve().parent / "spacetui.db")
@@ -39,6 +40,14 @@ CREATE TABLE IF NOT EXISTS market_observations (
     activity       TEXT,
     observed_at    REAL NOT NULL,
     PRIMARY KEY (waypoint, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS jump_edges (
+    from_system TEXT NOT NULL,
+    from_gate   TEXT NOT NULL,
+    to_system   TEXT NOT NULL,
+    to_gate     TEXT NOT NULL,
+    PRIMARY KEY (from_gate, to_gate)
 );
 """
 
@@ -120,6 +129,43 @@ def record_market(market: dict, conn: sqlite3.Connection | None = None) -> int:
     return len(rows)
 
 
+def record_jump_gate(gate: dict, conn: sqlite3.Connection | None = None) -> int:
+    """Store the edges from a JumpGate payload ``{symbol, connections[]}``.
+
+    Each connection is a gate waypoint in another system; the edge lets us later
+    plan multi-hop routes. Returns the number of edges recorded.
+    """
+    from_gate = gate.get("symbol", "")
+    connections = gate.get("connections") or []
+    if not from_gate or not connections:
+        return 0
+    from_system = _sys_of(from_gate)
+    rows = [
+        (from_system, from_gate, _sys_of(to_gate), to_gate)
+        for to_gate in connections
+    ]
+    c = conn or connect()
+    with _lock:
+        c.executemany(
+            """
+            INSERT INTO jump_edges (from_system, from_gate, to_system, to_gate)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(from_gate, to_gate) DO UPDATE SET
+                from_system=excluded.from_system, to_system=excluded.to_system
+            """,
+            rows,
+        )
+        c.commit()
+    return len(rows)
+
+
+def jump_edges(conn: sqlite3.Connection | None = None) -> list[dict]:
+    c = conn or connect()
+    with _lock:
+        cur = c.execute("SELECT * FROM jump_edges")
+        return [dict(r) for r in cur.fetchall()]
+
+
 def latest_prices(
     system: str | None = None,
     max_age_s: float | None = None,
@@ -147,8 +193,22 @@ def best_routes(
     system: str | None = None,
     min_profit: int = 1,
     max_age_s: float = 3600.0,
+    max_hops: int = 0,
+    hop_penalty: int = 0,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
-    """Rank profitable same-system routes from the freshest stored prices."""
+    """Rank profitable routes from the freshest stored prices.
+
+    With ``max_hops == 0`` this is same-system only. With ``max_hops > 0`` (and a
+    ``system`` to start from) it also considers markets in systems reachable
+    through the recorded jump-gate network, scored net of a per-hop penalty.
+    """
+    if max_hops and system:
+        obs = latest_prices(max_age_s=max_age_s, conn=conn)
+        adj, _ = build_graph(jump_edges(conn=conn))
+        return cross_system_scan(
+            obs, adj, current_system=system, min_profit=min_profit,
+            max_hops=max_hops, hop_penalty=hop_penalty,
+        )
     obs = latest_prices(system=system, max_age_s=max_age_s, conn=conn)
     return arbitrage_scan(obs, min_profit=min_profit, system=system)

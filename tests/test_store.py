@@ -58,3 +58,27 @@ def test_best_routes_end_to_end():
     assert routes[0]["profit"] == 140
     assert routes[0]["buy_wp"] == "X1-A-1"
     assert routes[0]["sell_wp"] == "X1-A-2"
+
+
+def test_record_jump_gate_and_edges():
+    conn = store.connect(":memory:")
+    n = store.record_jump_gate(
+        {"symbol": "X1-A-GATE", "connections": ["X1-B-GATE", "X1-C-GATE"]}, conn=conn
+    )
+    assert n == 2
+    edges = store.jump_edges(conn=conn)
+    assert {(e["from_system"], e["to_system"]) for e in edges} == {("X1-A", "X1-B"), ("X1-A", "X1-C")}
+
+
+def test_best_routes_cross_system():
+    conn = store.connect(":memory:")
+    store.record_market(market("X1-A-1", [good("IRON", 100, 90)]), conn=conn)
+    store.record_market(market("X1-B-1", [good("IRON", 400, 380)]), conn=conn)
+    store.record_jump_gate({"symbol": "X1-A-GATE", "connections": ["X1-B-GATE"]}, conn=conn)
+    # same-system only: nothing (IRON seen once per system)
+    assert store.best_routes(system="X1-A", min_profit=50, conn=conn) == []
+    # cross-system: the A->B route surfaces
+    routes = store.best_routes(system="X1-A", min_profit=50, max_hops=2, conn=conn)
+    assert len(routes) == 1
+    assert routes[0]["buy_system"] == "X1-A" and routes[0]["sell_system"] == "X1-B"
+    assert routes[0]["hops"] == 1

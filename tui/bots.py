@@ -8,6 +8,7 @@ import time
 import config
 import store
 from api import ApiError, Client
+from routing import build_graph, shortest_path, system_of
 
 
 class BotCancelled(Exception):
@@ -413,6 +414,9 @@ class TraderBot(BaseBot):
         budget: int | None = None,
         max_age_s: float = 3600.0,
         loops: int | None = None,
+        cross_system: bool = False,
+        max_hops: int = 2,
+        hop_penalty: int = 0,
         on_log=None,
         on_status=None,
     ):
@@ -421,6 +425,10 @@ class TraderBot(BaseBot):
         self.budget = budget
         self.max_age_s = max_age_s
         self.loops = loops
+        self.cross_system = cross_system
+        self.max_hops = max_hops
+        self.hop_penalty = hop_penalty
+        self._gated: set[str] = set()  # systems whose jump gate we've mapped
 
     # -- internals ---------------------------------------------------------
     def _record_here(self, system: str, waypoint: str) -> dict | None:
@@ -446,6 +454,79 @@ class TraderBot(BaseBot):
     def _first_market(self, system: str) -> str | None:
         for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
             return w["symbol"]
+        return None
+
+    # -- jump-gate network -------------------------------------------------
+    def _map_gate(self, system: str) -> None:
+        """Record ``system``'s jump gate and its connections (once per system)."""
+        if system in self._gated:
+            return
+        self._gated.add(system)
+        try:
+            gates = self.c.waypoints(system, filters={"type": "JUMP_GATE"})
+        except ApiError:
+            return
+        if not gates:
+            return
+        try:
+            jg = self.c.jump_gate(system, gates[0]["symbol"])
+        except ApiError:
+            return
+        n = store.record_jump_gate(jg)
+        if n:
+            self._log(f"mapped jump gate {gates[0]['symbol']} ({n} links)")
+
+    def _travel_to_system(self, target: str) -> bool:
+        """Jump-hop from the current system to ``target``. Returns success."""
+        s = self.c.ship(self.ship)
+        current = s.get("nav", {}).get("systemSymbol", "")
+        if current == target:
+            return True
+        self._map_gate(current)
+        adj, gate_of = build_graph(store.jump_edges())
+        path = shortest_path(adj, current, target)
+        if not path or len(path) < 2:
+            self._log(f"no jump route {current} → {target}")
+            return False
+        for nxt in path[1:]:
+            cur_gate, dest_gate = gate_of.get(current), gate_of.get(nxt)
+            if not cur_gate or not dest_gate:
+                self._log(f"missing gate for {current}/{nxt}")
+                return False
+            s = self._goto(s, cur_gate)
+            if s.get("nav", {}).get("status") == "DOCKED":
+                self.c.orbit(self.ship)
+            self._status(mode="jump", last=f"jump → {nxt}")
+            try:
+                self.c.jump(self.ship, dest_gate)
+            except ApiError as e:
+                self._log(f"jump failed: {e.message}")
+                return False
+            self._await_cooldown()
+            s = self._await_arrival()
+            current = nxt
+            self._map_gate(current)
+        self._log(f"arrived in {target}")
+        return True
+
+    def _next_unscanned_system(self, current: str) -> str | None:
+        """A reachable neighbour system we have no market prices for yet."""
+        adj, _ = build_graph(store.jump_edges())
+        priced = {o["system"] for o in store.latest_prices(max_age_s=self.max_age_s)}
+        # breadth-first within max_hops
+        frontier, seen, hops = [current], {current}, 0
+        while frontier and hops < self.max_hops:
+            hops += 1
+            nxt_frontier = []
+            for sys_sym in frontier:
+                for nb in sorted(adj.get(sys_sym, ())):
+                    if nb in seen:
+                        continue
+                    seen.add(nb)
+                    if nb not in priced:
+                        return nb
+                    nxt_frontier.append(nb)
+            frontier = nxt_frontier
         return None
 
     def _buy(self, good: str, want: int, per_tx: int) -> tuple[int, int]:
@@ -501,26 +582,38 @@ class TraderBot(BaseBot):
             self._log(f"budget too small for {good} @ {route['buy']}c")
             self._sleep(15)
             return
+        buy_system = route.get("buy_system", route["system"])
+        sell_system = route.get("sell_system", route["system"])
+        hop_note = f"  [{route.get('hops', 0)} hop(s)]" if route.get("hops") else ""
         self._log(
             f"route {good}: buy {route['buy']} @ {route['buy_wp']} → "
-            f"sell {route['sell']} @ {route['sell_wp']} (+{route['profit']}/u)"
+            f"sell {route['sell']} @ {route['sell_wp']} (+{route['profit']}/u){hop_note}"
         )
-        # buy leg
+        # buy leg — travel to the buy system first if it's elsewhere
+        if system_of(route["buy_wp"]) != s.get("nav", {}).get("systemSymbol", ""):
+            if not self._travel_to_system(buy_system):
+                return
+            s = self.c.ship(self.ship)
         s = self._goto(s, route["buy_wp"])
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="buy", last=f"buy {good}")
         bought, spent = self._buy(good, want, per_tx)
-        self._record_here(route["system"], route["buy_wp"])
+        self._record_here(buy_system, route["buy_wp"])
         if bought <= 0:
             return
-        # sell leg
+        # sell leg — travel to the sell system if different
+        if sell_system != s.get("nav", {}).get("systemSymbol", ""):
+            if not self._travel_to_system(sell_system):
+                self._log("stranded with cargo; will offload next cycle")
+                return
+            s = self.c.ship(self.ship)
         s = self._goto(s, route["sell_wp"])
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="sell", last=f"sell {good}")
         sold, revenue = self._sell(good, per_tx)
-        self._record_here(route["system"], route["sell_wp"])
+        self._record_here(sell_system, route["sell_wp"])
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
 
     def _offload(self, s: dict, system: str) -> None:
@@ -558,26 +651,40 @@ class TraderBot(BaseBot):
 
                 # record where we are, if it's a market
                 self._record_here(system, here)
+                if self.cross_system:
+                    self._map_gate(system)
 
                 # clear leftover cargo before starting a fresh trade
                 if units > 0:
                     self._offload(s, system)
                     continue
 
-                routes = store.best_routes(system, self.min_profit, self.max_age_s)
+                hops = self.max_hops if self.cross_system else 0
+                routes = store.best_routes(
+                    system, self.min_profit, self.max_age_s,
+                    max_hops=hops, hop_penalty=self.hop_penalty,
+                )
                 if routes:
                     self._execute(routes[0], s, capacity)
                     continue
 
-                # no known profitable route — go scan an unseen market
+                # no known profitable route — scan an unseen market in-system
                 nxt = self._next_unscanned_market(system, here)
                 if nxt:
                     self._log(f"exploring markets → {nxt}")
                     self._goto(s, nxt)
                     continue
 
+                # then, if allowed, jump to a neighbour system to gather prices
+                if self.cross_system:
+                    nsys = self._next_unscanned_system(system)
+                    if nsys:
+                        self._log(f"exploring system → {nsys}")
+                        if self._travel_to_system(nsys):
+                            continue
+
                 self._log(
-                    f"no route ≥ {self.min_profit}c in {system}; waiting for prices to move"
+                    f"no route ≥ {self.min_profit}c reachable from {system}; waiting"
                 )
                 self._status(mode="idle", last="no route")
                 self._sleep(30)

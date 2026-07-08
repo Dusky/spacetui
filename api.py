@@ -175,8 +175,9 @@ class Client:
             "data"
         ]
 
-    def jump(self, symbol: str, system: str) -> dict:
-        return self.post(f"/my/ships/{symbol}/jump", json={"systemSymbol": system})["data"]
+    def jump(self, symbol: str, waypoint: str) -> dict:
+        # jump targets a connected jump-gate *waypoint* (in another system)
+        return self.post(f"/my/ships/{symbol}/jump", json={"waypointSymbol": waypoint})["data"]
 
     def sell(self, symbol: str, trade_symbol: str, units: int) -> dict:
         return self.post(

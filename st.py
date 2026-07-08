@@ -199,7 +199,7 @@ def cmd_waypoints(args, c: Client) -> None:
     system = args.system or _system_of(config.HQ) or "X1-N85"
     filters: dict[str, Any] = {}
     if args.type:
-        filters["waypointType"] = args.type
+        filters["type"] = args.type
     if args.traits:
         filters["traits"] = ",".join(args.traits)
     wps = c.waypoints(system, filters=filters or None)
@@ -703,22 +703,25 @@ def _maybe_refuel(c: Client, ship: str, threshold: float = 0.4) -> None:
 # -- trading ----------------------------------------------------------------
 def cmd_deals(args, c: Client) -> None:
     routes = store.best_routes(
-        system=args.system, min_profit=args.min_profit, max_age_s=args.max_age
+        system=args.system, min_profit=args.min_profit, max_age_s=args.max_age,
+        max_hops=args.max_hops,
     )
     if not routes:
-        print(
-            "No profitable routes recorded yet.\n"
+        hint = (
             "Visit markets to gather live prices first, e.g. `st.py market <WAYPOINT>`."
+            if not args.max_hops
+            else "Pass a --system to start from, and make sure jump gates have been mapped."
         )
+        print(f"No profitable routes recorded yet.\n{hint}")
         return
     print(
         f"{'GOOD':<20} {'BUY @':<13} {'SELL @':<13} "
-        f"{'buy':>6} {'sell':>6} {'profit':>7} {'vol':>4}"
+        f"{'buy':>6} {'sell':>6} {'profit':>7} {'vol':>4} {'hops':>4}"
     )
     for r in routes[: args.limit]:
         print(
             f"{r['good']:<20} {r['buy_wp']:<13} {r['sell_wp']:<13} "
-            f"{r['buy']:>6} {r['sell']:>6} {r['profit']:>7} {r['volume']:>4}"
+            f"{r['buy']:>6} {r['sell']:>6} {r['profit']:>7} {r['volume']:>4} {r.get('hops', 0):>4}"
         )
 
 
@@ -731,6 +734,8 @@ def cmd_trade(args, c: Client) -> None:
         min_profit=args.min_profit,
         budget=args.budget,
         loops=args.loops,
+        cross_system=args.cross_system,
+        max_hops=args.max_hops,
         on_log=lambda m: print(m),
     )
     print(f"Trader engaged on {args.ship}. Ctrl+C to stop.")
@@ -946,10 +951,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_autopilot)
 
     sp = sub.add_parser("deals", help="show best known arbitrage routes from stored prices")
-    sp.add_argument("--system", help="limit to one system (default: all)")
+    sp.add_argument("--system", help="same-system: filter; cross-system: start system")
     sp.add_argument("--min-profit", type=int, default=1, dest="min_profit")
     sp.add_argument("--max-age", type=float, default=3600.0, dest="max_age",
                     help="ignore prices older than N seconds (default 3600)")
+    sp.add_argument("--max-hops", type=int, default=0, dest="max_hops",
+                    help="include cross-system routes within N jumps of --system")
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_deals)
 
@@ -959,6 +966,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="minimum profit per unit to take a route (default 50)")
     sp.add_argument("--budget", type=int, help="max credits to spend per buy leg")
     sp.add_argument("--loops", type=int, help="stop after N trade cycles")
+    sp.add_argument("--cross-system", action="store_true", dest="cross_system",
+                    help="trade across the jump-gate network, not just one system")
+    sp.add_argument("--max-hops", type=int, default=2, dest="max_hops",
+                    help="max jumps away to consider (with --cross-system, default 2)")
     sp.set_defaults(func=cmd_trade)
 
     sp = sub.add_parser("expand", help="autonomously buy ships while credits allow")
