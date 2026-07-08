@@ -25,8 +25,10 @@ checklist item here in the same commit. Check it off when the TUI gains it.
 
 - [ ] **Orchestrator configuration.** The **web UI now** has form controls for
   reinvest ship type (`--expand`), credit reserve (`--credit-buffer`), max ships,
-  and cross-system. The TUI orchestrate button still starts with defaults — add
-  the same options (an input row on the Automation pane, or a small modal).
+  cross-system, and **auto-contracts**. The TUI orchestrate button still starts
+  with defaults — add the same options (an input row on the Automation pane, or a
+  small modal). Backend supports them all already
+  (`Orchestrator(..., auto_contracts=...)`).
 
 - [ ] **In-app onboarding (optional).** The web UI has an in-app setup screen
   (paste token / register) via `POST /api/setup` → `onboarding.save_agent_token`

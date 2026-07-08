@@ -800,6 +800,18 @@ def cmd_trade(args, c: Client) -> None:
         print("\nTrader disengaged.")
 
 
+def cmd_autocontract(args, c: Client) -> None:
+    from contracts import ContractManager
+
+    mgr = ContractManager(c, args.ship, on_log=lambda m: print(m))
+    print(f"Contract manager engaged on {args.ship}. Ctrl+C to stop.")
+    try:
+        mgr.run()
+    except KeyboardInterrupt:
+        mgr.stop()
+        print("\nContract manager stopped.")
+
+
 def cmd_orchestrate(args, c: Client) -> None:
     from orchestrator import Orchestrator
 
@@ -809,6 +821,7 @@ def cmd_orchestrate(args, c: Client) -> None:
         expand_ship_type=args.expand,
         max_ships=args.max_ships,
         cross_system=args.cross_system,
+        auto_contracts=args.auto_contracts,
         on_log=lambda m: print(m),
     )
     print("Fleet orchestrator engaged. Ctrl+C to stop.")
@@ -1066,7 +1079,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-ships", type=int, dest="max_ships", help="cap the fleet size")
     sp.add_argument("--cross-system", action="store_true", dest="cross_system",
                     help="let traders/scouts range across the jump-gate network")
+    sp.add_argument("--auto-contracts", action="store_true", dest="auto_contracts",
+                    help="negotiate/accept procurement contracts and have miners fulfill them")
     sp.set_defaults(func=cmd_orchestrate)
+
+    sp = sub.add_parser("autocontract", help="keep procurement contracts flowing (negotiate/accept)")
+    sp.add_argument("ship", help="a ship able to negotiate (docked at a faction waypoint, e.g. HQ)")
+    sp.set_defaults(func=cmd_autocontract)
 
     sp = sub.add_parser("expand", help="autonomously buy ships while credits allow")
     sp.add_argument("ship_type", help="e.g. SHIP_MINING_DRONE, SHIP_LIGHT_HAULER")

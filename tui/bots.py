@@ -236,12 +236,15 @@ class MinerBot(BaseBot):
         *,
         contract: str | None = None,
         sell: bool = True,
+        get_contract=None,
         on_log=None,
         on_status=None,
     ):
         super().__init__(client, ship, on_log=on_log, on_status=on_status)
         self.contract_id = contract
         self.sell = sell
+        # optional callable returning the currently-active contract id to adopt
+        self.get_contract = get_contract
         self.surveys: list[dict] = []
 
     # -- internals ---------------------------------------------------------
@@ -388,6 +391,12 @@ class MinerBot(BaseBot):
                 system = nav.get("systemSymbol", "")
                 here = nav.get("waypointSymbol", "")
                 self.surveys = [sv for sv in self.surveys if sv.get("symbol") == here]
+
+                # adopt the orchestrator's active contract, if any
+                if self.get_contract:
+                    cid = self.get_contract()
+                    if cid:
+                        self.contract_id = cid
 
                 if self._ensure_fuel(s):
                     continue

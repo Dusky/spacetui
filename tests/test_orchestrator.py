@@ -115,6 +115,25 @@ def test_no_expand_without_ship_type():
     assert client.purchases == []
 
 
+def test_miner_adopts_active_contract():
+    fleet = [ship("M", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30)]
+    orch, _ = make_orch(FakeClient(fleet), auto_contracts=True)
+
+    class MgrStub:
+        active_contract_id = "ctr-9"
+
+    orch._contract_mgr = MgrStub()
+    bot = orch._make_bot("M", "miner")
+    assert bot.get_contract() == "ctr-9"
+
+
+def test_miner_no_contract_without_manager():
+    fleet = [ship("M", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30)]
+    orch, _ = make_orch(FakeClient(fleet))
+    bot = orch._make_bot("M", "miner")
+    assert bot.get_contract() is None
+
+
 class _DeadThread:
     def is_alive(self):
         return False

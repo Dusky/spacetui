@@ -14,6 +14,7 @@ import time
 
 import config
 from api import ApiError, Client
+from contracts import ContractManager
 from fleet import find_offer, plan_expansion
 from routing import system_of
 from tui.bots import MinerBot, ScoutBot, TraderBot
@@ -45,6 +46,7 @@ class Orchestrator:
         expand_ship_type: str | None = None,
         max_ships: int | None = None,
         cross_system: bool = False,
+        auto_contracts: bool = False,
         tick: int = 20,
         on_log=None,
         on_deploy=None,
@@ -55,7 +57,9 @@ class Orchestrator:
         self.expand_ship_type = expand_ship_type.upper() if expand_ship_type else None
         self.max_ships = max_ships
         self.cross_system = cross_system
+        self.auto_contracts = auto_contracts
         self.tick = tick
+        self._contract_mgr: ContractManager | None = None
         self.on_log = on_log or (lambda m: None)
         self.on_deploy = on_deploy or (lambda sym, role: None)
         # how a bot is put to work; overridable for tests
@@ -75,6 +79,8 @@ class Orchestrator:
 
     def stop(self) -> None:
         self._cancel.set()
+        if self._contract_mgr:
+            self._contract_mgr.stop()
         for bot in list(self.bots.values()):
             bot.stop()
 
@@ -92,7 +98,10 @@ class Orchestrator:
             self.on_log(f"[{r}] {msg}")
 
         if role == "miner":
-            bot = MinerBot(self.c, ship_symbol, on_log=log)
+            bot = MinerBot(
+                self.c, ship_symbol, on_log=log,
+                get_contract=lambda: self._contract_mgr.active_contract_id if self._contract_mgr else None,
+            )
         elif role == "trader":
             bot = TraderBot(self.c, ship_symbol, cross_system=self.cross_system, on_log=log)
         else:
@@ -104,6 +113,12 @@ class Orchestrator:
         t = threading.Thread(target=bot.run, daemon=True, name=f"orch-{bot.ship}")
         self._threads[bot.ship] = t
         t.start()
+
+    def _start_contract_mgr(self, ship: str) -> None:
+        self._contract_mgr = ContractManager(
+            self.c, ship, on_log=lambda m: self.on_log(f"[contract] {m}"))
+        threading.Thread(target=self._contract_mgr.run, daemon=True, name="orch-contracts").start()
+        self.on_log(f"contract manager engaged on {ship}")
 
     def _reap_dead(self) -> None:
         """Redeploy bots whose thread died (a bot that halted on some error).
@@ -173,6 +188,8 @@ class Orchestrator:
                     symbols = {s["symbol"] for s in ships}
                     self._reap(symbols)
                     self._reap_dead()
+                    if self.auto_contracts and self._contract_mgr is None and ships:
+                        self._start_contract_mgr(ships[0]["symbol"])
                     for ship in ships:
                         self._deploy(ship)
                     self._maybe_expand(len(ships))

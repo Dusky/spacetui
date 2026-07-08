@@ -63,9 +63,15 @@ profit into more ships.
 # deploy a bot to every ship and keep them working
 .venv/bin/python st.py orchestrate
 
-# ...and reinvest profit into mining drones, keeping a 100k reserve
-.venv/bin/python st.py orchestrate --expand SHIP_MINING_DRONE --credit-buffer 100000 --max-ships 12
+# ...reinvest profit into mining drones and keep contracts flowing
+.venv/bin/python st.py orchestrate --expand SHIP_MINING_DRONE --max-ships 12 --auto-contracts
+
+# just keep procurement contracts flowing on one ship (negotiate/accept loop)
+.venv/bin/python st.py autocontract <SHIP>
 ```
+
+With `--auto-contracts`, the orchestrator negotiates and accepts procurement
+contracts and the miners automatically adopt and fulfill the active one.
 
 Ship roles are chosen automatically:
 

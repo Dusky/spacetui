@@ -218,7 +218,8 @@ function vAutomation() {
       cfg.expand ? `reinvest ${cfg.expand}` : "no reinvest",
       `reserve ${fmt(cfg.credit_buffer)}c`,
       cfg.max_ships ? `cap ${cfg.max_ships}` : null,
-      cfg.cross_system ? "cross-system" : null].filter(Boolean);
+      cfg.cross_system ? "cross-system" : null,
+      cfg.auto_contracts ? "auto-contracts" : null].filter(Boolean);
     row.appendChild(btn); row.appendChild(el("span", "muted", "running · " + bits.join(" · ")));
     bar.appendChild(row);
   } else {
@@ -227,7 +228,8 @@ function vAutomation() {
       <input id="o-expand" placeholder="reinvest ship type — blank = off" style="width:280px">
       <input id="o-buffer" type="number" placeholder="reserve" value="100000" style="width:120px">
       <input id="o-max" type="number" placeholder="max ships" style="width:110px">
-      <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>`;
+      <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>
+      <label class="muted"><input id="o-contracts" type="checkbox"> auto-contracts</label>`;
     bar.appendChild(cfg);
     const row = el("div", "row");
     const btn = el("button", "btn primary", "🚀 Orchestrate Fleet");
@@ -238,6 +240,7 @@ function vAutomation() {
         credit_buffer: $("#o-buffer").value,
         max_ships: $("#o-max").value,
         cross_system: $("#o-cross").checked,
+        auto_contracts: $("#o-contracts").checked,
       });
       poll();
     };
