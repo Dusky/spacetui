@@ -7,10 +7,16 @@ from textual.containers import Container, Horizontal, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, DataTable, Input, RichLog, Static
 
+import store
+from .charts import BrailleChart, block_sparkline, hbar
 from .theme import PAL, NAV_STATUS, ratio_color
 from .widgets import ContractCard, Gauge, Panel, Pill, ShipCard, Stat
 
 CHEAP, GOOD, DEAR = PAL.success, PAL.primary, PAL.danger
+
+
+def _credits(n) -> str:
+    return f"{int(n):,}c"
 
 
 class FleetAction(Message):
@@ -351,3 +357,128 @@ class AutomationPane(Pane):
         row = self.rows.get(sym)
         if row:
             row.set_state(running, last=last, mode=mode)
+
+
+# ---------------- Analytics -----------------------------------------------
+class AnalyticsPane(Pane):
+    title = "📈  ANALYTICS"
+    sub = "net worth · realized P&L · price history · market intel"
+
+    def body(self):
+        with Container(classes="stat-grid"):
+            yield Stat("NET WORTH", "—", accent="--green", id="an-worth")
+            yield Stat("REALIZED NET", "—", accent="--gold", id="an-net")
+            yield Stat("TRADES", "—", id="an-trades")
+            yield Stat("MARKETS", "—", accent="--pink", id="an-markets")
+
+        self.worth_chart = BrailleChart(height_cells=7, unit="c", id="an-worth-chart")
+        yield Panel("NET WORTH OVER TIME", self.worth_chart, subtitle="credits")
+
+        self.watchlist = DataTable(id="an-watchlist")
+        yield Panel("GOODS WATCHLIST", self.watchlist, subtitle="sell price trend")
+
+        self.pnl_bars = Static("", id="an-pnl")
+        yield Panel("REALIZED P&L BY GOOD", self.pnl_bars, subtitle="net credits")
+
+        self.routes_tbl = DataTable(id="an-routes")
+        yield Panel("TOP ROUTES", self.routes_tbl, subtitle="from stored prices")
+
+        self.activity_bars = Static("", id="an-activity")
+        yield Panel("MARKET ACTIVITY", self.activity_bars, subtitle="live goods by activity")
+
+    def refresh_state(self, app) -> None:
+        self._fill_stats(app)
+        self._fill_worth()
+        self._fill_watchlist()
+        self._fill_pnl()
+        self._fill_routes(app)
+        self._fill_activity()
+
+    # -- sections ----------------------------------------------------------
+    def _fill_stats(self, app) -> None:
+        credits = (app.agent or {}).get("credits", 0)
+        pnl = store.pnl_summary()
+        self.query_one("#an-worth", Stat).set_value(f"{credits:,}")
+        net = pnl["net"]
+        net_w = self.query_one("#an-net", Stat)
+        net_w.set_value(f"{net:+,}")
+        self.query_one("#an-trades", Stat).set_value(str(pnl["trades"]))
+        self.query_one("#an-markets", Stat).set_value(str(len(store.latest_prices())))
+
+    def _fill_worth(self) -> None:
+        series = [r["credits"] for r in store.credit_series(limit=400)]
+        self.worth_chart.set_data(series)
+
+    def _fill_watchlist(self) -> None:
+        tbl = self.watchlist
+        if not tbl.columns:
+            tbl.add_columns("Good", "Sell", "Δ", "Trend")
+        tbl.clear()
+        for sym in store.tracked_goods(limit=12):
+            series = store.price_series(sym, limit=60)
+            sells = [r["sell_price"] for r in series if r["sell_price"] is not None]
+            if not sells:
+                continue
+            last = sells[-1]
+            delta = last - sells[0]
+            dcol = PAL.success if delta >= 0 else PAL.danger
+            spark = block_sparkline(sells, width=24)
+            tbl.add_row(
+                Text(sym, style=PAL.text),
+                Text(f"{last:,}", style=PAL.text),
+                Text(f"{delta:+,}", style=dcol),
+                Text(spark, style=dcol),
+            )
+
+    def _fill_pnl(self) -> None:
+        rows = store.pnl_by_good(limit=8)
+        if not rows:
+            self.pnl_bars.update(Text("no trades recorded yet", style=PAL.text_muted))
+            return
+        peak = max((abs(r["net"]) for r in rows), default=1) or 1
+        t = Text()
+        for r in rows:
+            col = PAL.success if r["net"] >= 0 else PAL.danger
+            t.append(f"{r['symbol']:<20} ", style=PAL.text_dim)
+            t.append(f"{hbar(r['net'], peak, 22):<22} ", style=col)
+            t.append(f"{r['net']:+,}c\n", style=col)
+        self.pnl_bars.update(t)
+
+    def _fill_routes(self, app) -> None:
+        tbl = self.routes_tbl
+        if not tbl.columns:
+            tbl.add_columns("Good", "Buy @", "Sell @", "Profit", "Hops")
+        tbl.clear()
+        system = None
+        if app.fleet_pane and app.fleet_pane.focus:
+            ship = next((s for s in (app.ships or []) if s["symbol"] == app.fleet_pane.focus), None)
+            if ship:
+                system = ship.get("nav", {}).get("systemSymbol")
+        routes = store.best_routes(system=system, min_profit=1, max_hops=2 if system else 0)
+        for r in routes[:10]:
+            t = r.get("hops", 0)
+            tbl.add_row(
+                Text(r["good"], style=PAL.text),
+                Text(r["buy_wp"], style=PAL.text_dim),
+                Text(r["sell_wp"], style=PAL.text_dim),
+                Text(f"+{r['profit']:,}", style=PAL.success),
+                Text(str(t), style=PAL.warning if t else PAL.text_muted),
+            )
+
+    def _fill_activity(self) -> None:
+        breakdown = store.activity_breakdown()
+        if not breakdown:
+            self.activity_bars.update(Text("no market data yet", style=PAL.text_muted))
+            return
+        peak = max(breakdown.values()) or 1
+        palette = {
+            "STRONG": PAL.success, "GROWING": PAL.primary, "WEAK": PAL.warning,
+            "RESTRICTED": PAL.danger, "UNKNOWN": PAL.text_muted,
+        }
+        t = Text()
+        for name, n in breakdown.items():
+            col = palette.get(name, PAL.accent)
+            t.append(f"{name:<12} ", style=PAL.text_dim)
+            t.append(f"{hbar(n, peak, 22):<22} ", style=col)
+            t.append(f"{n}\n", style=PAL.text)
+        self.activity_bars.update(t)

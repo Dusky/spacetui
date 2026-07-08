@@ -6,6 +6,7 @@ from typing import Any, Iterator
 import requests
 
 import config
+from ratelimit import LIMITER
 
 
 class ApiError(Exception):
@@ -43,6 +44,7 @@ class Client:
     ) -> dict:
         url = f"{self.base_url}{path}"
         for attempt in range(3 if retry_on_rate_limit else 1):
+            LIMITER.acquire()
             resp = self.session.request(method, url, params=params, json=json, timeout=30)
             if resp.status_code == 429 and retry_on_rate_limit:
                 retry = float(resp.headers.get("Retry-After", "1") or 1)
@@ -106,12 +108,30 @@ class Client:
     def negotiate_contract(self, ship_symbol: str) -> dict:
         return self.post(f"/my/ships/{ship_symbol}/negotiate/contract", json={})["data"]
 
+    def deliver_contract(
+        self, contract_id: str, ship_symbol: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/my/contracts/{contract_id}/deliver",
+            json={
+                "shipSymbol": ship_symbol,
+                "tradeSymbol": trade_symbol,
+                "units": int(units),
+            },
+        )["data"]
+
     def fulfill_contract(self, contract_id: str) -> dict:
         return self.post(f"/my/contracts/{contract_id}/fulfill", json={})["data"]
 
     # -- ships -------------------------------------------------------------
     def ships(self) -> list[dict]:
         return list(self.paginate("/my/ships"))
+
+    def purchase_ship(self, ship_type: str, waypoint: str) -> dict:
+        return self.post(
+            "/my/ships",
+            json={"shipType": ship_type, "waypointSymbol": waypoint},
+        )["data"]
 
     def ship(self, symbol: str) -> dict:
         return self.get(f"/my/ships/{symbol}")["data"]
@@ -155,8 +175,9 @@ class Client:
             "data"
         ]
 
-    def jump(self, symbol: str, system: str) -> dict:
-        return self.post(f"/my/ships/{symbol}/jump", json={"systemSymbol": system})["data"]
+    def jump(self, symbol: str, waypoint: str) -> dict:
+        # jump targets a connected jump-gate *waypoint* (in another system)
+        return self.post(f"/my/ships/{symbol}/jump", json={"waypointSymbol": waypoint})["data"]
 
     def sell(self, symbol: str, trade_symbol: str, units: int) -> dict:
         return self.post(
@@ -178,6 +199,58 @@ class Client:
 
     def cargo(self, symbol: str) -> dict:
         return self.get(f"/my/ships/{symbol}/cargo")["data"]
+
+    def transfer_cargo(
+        self, symbol: str, trade_symbol: str, units: int, dest_ship: str
+    ) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/transfer",
+            json={"tradeSymbol": trade_symbol, "units": int(units), "shipSymbol": dest_ship},
+        )["data"]
+
+    def siphon(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/siphon", json={})["data"]
+
+    def refine(self, symbol: str, produce: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/refine", json={"produce": produce})["data"]
+
+    def chart(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/chart", json={})["data"]
+
+    def scan_waypoints(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/waypoints", json={})["data"]
+
+    def scan_systems(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/systems", json={})["data"]
+
+    def scan_ships(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/ships", json={})["data"]
+
+    # -- refit / maintenance ----------------------------------------------
+    def ship_mounts(self, symbol: str) -> list[dict]:
+        return self.get(f"/my/ships/{symbol}/mounts")["data"]
+
+    def install_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/install", json={"symbol": mount_symbol}
+        )["data"]
+
+    def remove_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/remove", json={"symbol": mount_symbol}
+        )["data"]
+
+    def repair_cost(self, symbol: str) -> dict:
+        return self.get(f"/my/ships/{symbol}/repair")["data"]
+
+    def repair_ship(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/repair", json={})["data"]
+
+    def scrap_value(self, symbol: str) -> dict:
+        return self.get(f"/my/ships/{symbol}/scrap")["data"]
+
+    def scrap_ship(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scrap", json={})["data"]
 
     # -- world -------------------------------------------------------------
     def systems(self) -> list[dict]:
@@ -209,6 +282,7 @@ class Client:
         token = account_token or config.ACCOUNT_TOKEN
         if not token:
             raise SystemExit("No ST_ACCOUNT_TOKEN in .env; cannot register.")
+        LIMITER.acquire()
         resp = requests.post(
             f"{config.BASE_URL}/register",
             json={"symbol": symbol, "faction": faction},

@@ -12,7 +12,21 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Create a `.env` (gitignored) with your tokens:
+### First run
+
+Just launch the app (or the CLI) — a first-run wizard walks you through getting
+an agent token and writes `.env` for you:
+
+```bash
+.venv/bin/python -m tui        # onboarding runs automatically on first launch
+.venv/bin/python st.py setup   # or run the wizard directly from the CLI
+```
+
+The wizard lets you paste an existing agent token, or register a brand-new agent
+from your [spacetraders.io](https://spacetraders.io) account token. It validates
+the token against the live API and fills in your callsign and HQ automatically.
+
+Prefer to do it by hand? Create a `.env` (gitignored) yourself:
 
 ```
 ST_AGENT_SYMBOL=MDOE

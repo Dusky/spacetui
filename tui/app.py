@@ -14,10 +14,11 @@ from textual import work
 import config
 from api import ApiError, Client
 
-from .bots import MinerBot
+from .bots import MinerBot, TraderBot
 from .theme import PAL
 from .views import (
     AgentPane,
+    AnalyticsPane,
     AutomationPane,
     ContractAction,
     ContractsPane,
@@ -46,6 +47,7 @@ class SpaceTradersApp(App):
         Binding("3", "switch('contracts')", "Contracts"),
         Binding("4", "switch('markets')", "Markets"),
         Binding("5", "switch('automation')", "Automate"),
+        Binding("6", "switch('analytics')", "Analytics"),
         Binding("j", "fleet_cycle(1)", "next ship"),
         Binding("k", "fleet_cycle(-1)", "prev ship"),
         Binding("r", "refresh", "refresh"),
@@ -72,12 +74,14 @@ class SpaceTradersApp(App):
         self.contracts_pane = ContractsPane(id="contracts")
         self.markets_pane = MarketsPane(id="markets")
         self.automation_pane = AutomationPane(id="automation")
+        self.analytics_pane = AnalyticsPane(id="analytics")
         self._panes = {
             "agent": self.agent_pane,
             "fleet": self.fleet_pane,
             "contracts": self.contracts_pane,
             "markets": self.markets_pane,
             "automation": self.automation_pane,
+            "analytics": self.analytics_pane,
         }
 
     # -- layout ------------------------------------------------------------
@@ -104,6 +108,7 @@ class SpaceTradersApp(App):
                 yield self.contracts_pane
                 yield self.markets_pane
                 yield self.automation_pane
+                yield self.analytics_pane
         with Horizontal(id="statusbar"):
             yield Static(" MDOE ", classes="sb-item --hot", id="sb-agent")
             yield Static(" credits — ", classes="sb-item --green", id="sb-credits")
@@ -154,6 +159,14 @@ class SpaceTradersApp(App):
                     self.current_contract_id = pending[0]["id"]
                 elif self.contracts:
                     self.current_contract_id = self.contracts[0]["id"]
+            try:
+                import store
+
+                store.record_credits(
+                    self.agent.get("credits", 0), self.agent.get("shipCount", 0)
+                )
+            except Exception:
+                pass
         # refresh active pane
         try:
             self._panes[self.active_tab].refresh_state(self)
@@ -224,33 +237,38 @@ class SpaceTradersApp(App):
         self.run_worker(self._do_contract_action, msg, thread=True, exclusive=False)
 
     def on_bot_row_toggle(self, msg) -> None:
-        from .widgets import BotRow
-
         sym = msg.symbol
         if sym in self.bots:
             self._stop_bot(sym)
         else:
-            self._start_bot(sym)
+            self._start_bot(sym, getattr(msg, "kind", "mine"))
 
     # -- bot management ----------------------------------------------------
-    def _start_bot(self, ship: str) -> None:
+    def _start_bot(self, ship: str, kind: str = "mine") -> None:
         if ship in self.bots:
             return
-        bot = MinerBot(
-            self.client,
-            ship,
-            contract=self.current_contract_id or None,
-            sell=True,
-            on_log=lambda m: self.call_from_thread(self._bot_log, m),
-            on_status=lambda **k: self.call_from_thread(self._bot_status, ship, **k),
-        )
+        on_log = lambda m: self.call_from_thread(self._bot_log, m)
+        on_status = lambda **k: self.call_from_thread(self._bot_status, ship, **k)
+        if kind == "trade":
+            bot = TraderBot(self.client, ship, on_log=on_log, on_status=on_status)
+            started = f"{ship}  trader started"
+        else:
+            bot = MinerBot(
+                self.client,
+                ship,
+                contract=self.current_contract_id or None,
+                sell=True,
+                on_log=on_log,
+                on_status=on_status,
+            )
+            started = f"{ship}  miner started (contract={self.current_contract_id or '-'})"
         self.bots[ship] = bot
 
         def _run():
             bot.run()
 
         self.run_worker(_run, thread=True, name=f"bot-{ship}", group=f"bot-{ship}")
-        self._bot_log(f"{ship}  bot started (contract={self.current_contract_id or '-'})")
+        self._bot_log(started)
         self.automation_pane.set_bot_state(ship, True, last="starting")
 
     def _stop_bot(self, ship: str) -> None:

@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 import config
+import store
 from api import ApiError, Client
 
 
@@ -142,6 +143,12 @@ def show_waypoint(w: dict) -> None:
 
 
 # -- commands ---------------------------------------------------------------
+def cmd_setup(args) -> None:
+    import onboarding
+
+    onboarding.run_wizard()
+
+
 def cmd_register(args) -> None:
     data = Client.register(args.symbol.upper(), args.faction.upper())
     token = data["token"]
@@ -192,7 +199,7 @@ def cmd_waypoints(args, c: Client) -> None:
     system = args.system or _system_of(config.HQ) or "X1-N85"
     filters: dict[str, Any] = {}
     if args.type:
-        filters["waypointType"] = args.type
+        filters["type"] = args.type
     if args.traits:
         filters["traits"] = ",".join(args.traits)
     wps = c.waypoints(system, filters=filters or None)
@@ -208,7 +215,11 @@ def cmd_waypoint(args, c: Client) -> None:
 
 def cmd_market(args, c: Client) -> None:
     system = args.system or _system_of(args.waypoint)
-    show_market(c.market(system, args.waypoint))
+    m = c.market(system, args.waypoint)
+    n = store.record_market(m)
+    show_market(m)
+    if n:
+        print(f"  (recorded {n} live prices)")
 
 
 def cmd_shipyard(args, c: Client) -> None:
@@ -218,6 +229,34 @@ def cmd_shipyard(args, c: Client) -> None:
     for t in data.get("ships", []):
         st = t.get("purchasePrice", "?")
         print(f"  {t.get('type','?'):<28} {st}")
+
+
+def cmd_buyship(args, c: Client) -> None:
+    from fleet import find_offer
+
+    ship_type = args.ship_type.upper()
+    system = args.system or _system_of(config.HQ) or _system_of(args.waypoint or "")
+    chosen_wp, price = find_offer(c, system, ship_type, args.waypoint)
+    if not chosen_wp:
+        print(f"No shipyard in {system} sells {ship_type}.")
+        return
+    credits = c.my_agent().get("credits", 0)
+    if price is not None:
+        if args.max_price and price > args.max_price:
+            print(f"{ship_type} costs {price}c at {chosen_wp}, above --max-price {args.max_price}c.")
+            return
+        if price > credits:
+            print(f"{ship_type} costs {price}c but you only have {_credits(credits)}.")
+            return
+    data = c.purchase_ship(ship_type, chosen_wp)
+    new_ship = data.get("ship", {})
+    tx = data.get("transaction", {})
+    ag = data.get("agent", {})
+    print(
+        f"Purchased {new_ship.get('symbol', '?')} ({ship_type}) at {chosen_wp} "
+        f"for {_credits(tx.get('price', price or 0))}.  "
+        f"Credits now {_credits(ag.get('credits', credits))}."
+    )
 
 
 def cmd_orbit(args, c: Client) -> None:
@@ -563,9 +602,9 @@ def _sell_off(c: Client, ship: str, system: str, *, contract: dict | None, sell_
     cargo = s.get("cargo", {})
     inv = cargo.get("inventory", [])
 
-    # 1) deliver contract goods first
+    # 1) deliver contract goods first (via the /deliver endpoint)
     if contract and not contract.get("fulfilled"):
-        dest = None
+        cid = contract["id"]
         deliver_goods = {}
         for d in contract["terms"]["deliver"]:
             need = d["unitsRequired"] - d["unitsFulfilled"]
@@ -581,10 +620,15 @@ def _sell_off(c: Client, ship: str, system: str, *, contract: dict | None, sell_
                 s = _await_arrival(c, ship)
                 nav = s["nav"]
             c.dock(ship)
-            # Need to be docked to deliver via sell to contract destination
-            c.sell(ship, good, units)
+            contract = c.deliver_contract(cid, ship, good, units).get("contract", contract)
             nav = {"waypointSymbol": destination, "status": "DOCKED"}
             print(f"  delivered {units} {good} to {destination}")
+        # fulfill once every deliverable is complete
+        if contract and not contract.get("fulfilled") and all(
+            dd["unitsFulfilled"] >= dd["unitsRequired"] for dd in contract["terms"]["deliver"]
+        ):
+            data = c.fulfill_contract(cid)
+            print(f"  contract fulfilled; credits now {_credits(data.get('agent', {}).get('credits', 0))}")
 
     # 2) sell remaining cargo at best marketplace
     s = _await_arrival(c, ship)
@@ -656,11 +700,176 @@ def _maybe_refuel(c: Client, ship: str, threshold: float = 0.4) -> None:
         print(f"  refuel skipped: {e.message}")
 
 
+# -- trading ----------------------------------------------------------------
+def cmd_deals(args, c: Client) -> None:
+    routes = store.best_routes(
+        system=args.system, min_profit=args.min_profit, max_age_s=args.max_age,
+        max_hops=args.max_hops,
+    )
+    if not routes:
+        hint = (
+            "Visit markets to gather live prices first, e.g. `st.py market <WAYPOINT>`."
+            if not args.max_hops
+            else "Pass a --system to start from, and make sure jump gates have been mapped."
+        )
+        print(f"No profitable routes recorded yet.\n{hint}")
+        return
+    print(
+        f"{'GOOD':<20} {'BUY @':<13} {'SELL @':<13} "
+        f"{'buy':>6} {'sell':>6} {'profit':>7} {'vol':>4} {'hops':>4}"
+    )
+    for r in routes[: args.limit]:
+        print(
+            f"{r['good']:<20} {r['buy_wp']:<13} {r['sell_wp']:<13} "
+            f"{r['buy']:>6} {r['sell']:>6} {r['profit']:>7} {r['volume']:>4} {r.get('hops', 0):>4}"
+        )
+
+
+def cmd_stats(args, c: Client) -> None:
+    from tui.charts import block_sparkline, hbar
+
+    agent = c.my_agent()
+    credits = agent.get("credits", 0)
+    store.record_credits(credits, agent.get("shipCount", 0))
+    series = [r["credits"] for r in store.credit_series(limit=200)]
+    print(f"Net worth   {_credits(credits)}")
+    if len(series) > 1:
+        print(f"  trend     {block_sparkline(series, width=40)}  ({series[0]:,} → {series[-1]:,})")
+
+    pnl = store.pnl_summary()
+    print(
+        f"\nRealized P&L  net {pnl['net']:+,}c   "
+        f"(spent {pnl['spent']:,}c · earned {pnl['earned']:,}c · {pnl['trades']} trades)"
+    )
+    by = store.pnl_by_good(limit=10)
+    if by:
+        peak = max((abs(r["net"]) for r in by), default=1) or 1
+        print("\nBy good:")
+        for r in by:
+            print(f"  {r['symbol']:<20} {hbar(r['net'], peak, 20):<20} {r['net']:+,}c")
+
+    routes = store.best_routes(
+        system=args.system, min_profit=args.min_profit, max_hops=args.max_hops
+    )
+    if routes:
+        print("\nTop routes:")
+        for r in routes[:10]:
+            print(
+                f"  {r['good']:<18} {r['buy_wp']} → {r['sell_wp']}  "
+                f"+{r['profit']:,}c  {r.get('hops', 0)}h"
+            )
+
+
+def cmd_trade(args, c: Client) -> None:
+    from tui.bots import TraderBot
+
+    bot = TraderBot(
+        c,
+        args.ship,
+        min_profit=args.min_profit,
+        budget=args.budget,
+        loops=args.loops,
+        cross_system=args.cross_system,
+        max_hops=args.max_hops,
+        on_log=lambda m: print(m),
+    )
+    print(f"Trader engaged on {args.ship}. Ctrl+C to stop.")
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        bot.stop()
+        print("\nTrader disengaged.")
+
+
+# -- fleet growth & refit ---------------------------------------------------
+def cmd_expand(args, c: Client) -> None:
+    from fleet import FleetManager
+
+    fm = FleetManager(
+        c,
+        args.ship_type,
+        system=args.system,
+        waypoint=args.waypoint,
+        credit_buffer=args.credit_buffer,
+        max_ships=args.max_ships,
+        max_price=args.max_price,
+        loops=args.loops,
+        on_log=lambda m: print(m),
+    )
+    try:
+        fm.run()
+    except KeyboardInterrupt:
+        fm.stop()
+        print("\nFleet manager stopped.")
+
+
+def cmd_mounts(args, c: Client) -> None:
+    for m in c.ship_mounts(args.ship):
+        print(f"  {m.get('symbol','?'):<28} {m.get('name','')}")
+
+
+def cmd_install_mount(args, c: Client) -> None:
+    c.install_mount(args.ship, args.mount)
+    print(f"Installed {args.mount} on {args.ship}.")
+
+
+def cmd_remove_mount(args, c: Client) -> None:
+    c.remove_mount(args.ship, args.mount)
+    print(f"Removed {args.mount} from {args.ship}.")
+
+
+def cmd_transfer(args, c: Client) -> None:
+    c.transfer_cargo(args.ship, args.trade, args.units, args.dest)
+    print(f"Transferred {args.units} {args.trade} from {args.ship} → {args.dest}.")
+
+
+def cmd_refine(args, c: Client) -> None:
+    data = c.refine(args.ship, args.produce.upper())
+    produced = data.get("produced", [])
+    consumed = data.get("consumed", [])
+    print(
+        f"Refined on {args.ship}: "
+        + ", ".join(f"+{p['units']} {p['tradeSymbol']}" for p in produced)
+        + (" (used " + ", ".join(f"{x['units']} {x['tradeSymbol']}" for x in consumed) + ")" if consumed else "")
+    )
+
+
+def cmd_siphon(args, c: Client) -> None:
+    c.orbit(args.ship)
+    data = c.siphon(args.ship)
+    y = data.get("siphon", {}).get("yield", {})
+    cd = data.get("cooldown", {})
+    print(f"Siphoned +{y.get('units',0)} {y.get('symbol','')} (cooldown {cd.get('totalSeconds',0)}s)")
+
+
+def cmd_repair(args, c: Client) -> None:
+    if args.quote:
+        tx = c.repair_cost(args.ship).get("transaction", {})
+        print(f"{args.ship} repair would cost {_credits(tx.get('totalPrice', 0))}.")
+        return
+    data = c.repair_ship(args.ship)
+    tx = data.get("transaction", {})
+    print(f"Repaired {args.ship} for {_credits(tx.get('totalPrice', 0))}.")
+
+
+def cmd_scrap(args, c: Client) -> None:
+    if args.quote:
+        tx = c.scrap_value(args.ship).get("transaction", {})
+        print(f"{args.ship} scrap would yield {_credits(tx.get('totalPrice', 0))}.")
+        return
+    data = c.scrap_ship(args.ship)
+    tx = data.get("transaction", {})
+    print(f"Scrapped {args.ship} for {_credits(tx.get('totalPrice', 0))}.")
+
+
 # -- entry ------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="st", description="SpaceTraders helper CLI")
     p.add_argument("--token", help="override ST_AGENT_TOKEN")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("setup", help="first-run setup: get an agent token and write .env")
+    sp.set_defaults(func=cmd_setup, raw=True)
 
     sp = sub.add_parser("register", help="register a new agent (uses account token)")
     sp.add_argument("symbol")
@@ -714,6 +923,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("waypoint")
     sp.add_argument("--system")
     sp.set_defaults(func=cmd_shipyard)
+
+    sp = sub.add_parser("buyship", help="buy a ship (auto-locates a shipyard selling the type)")
+    sp.add_argument("ship_type", help="e.g. SHIP_MINING_DRONE, SHIP_LIGHT_HAULER")
+    sp.add_argument("--waypoint", help="specific shipyard waypoint (else scan the system)")
+    sp.add_argument("--system", help="system to search (default: your HQ system)")
+    sp.add_argument("--max-price", type=int, dest="max_price", help="skip if price exceeds this")
+    sp.set_defaults(func=cmd_buyship)
 
     sp = sub.add_parser("orbit", help="orbit a ship")
     sp.add_argument("ship")
@@ -769,6 +985,85 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--loops", type=int, help="stop after N extract cycles")
     sp.set_defaults(func=cmd_autopilot)
 
+    sp = sub.add_parser("deals", help="show best known arbitrage routes from stored prices")
+    sp.add_argument("--system", help="same-system: filter; cross-system: start system")
+    sp.add_argument("--min-profit", type=int, default=1, dest="min_profit")
+    sp.add_argument("--max-age", type=float, default=3600.0, dest="max_age",
+                    help="ignore prices older than N seconds (default 3600)")
+    sp.add_argument("--max-hops", type=int, default=0, dest="max_hops",
+                    help="include cross-system routes within N jumps of --system")
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(func=cmd_deals)
+
+    sp = sub.add_parser("stats", help="analytics: net worth, realized P&L, top routes")
+    sp.add_argument("--system", help="start system for cross-system routes")
+    sp.add_argument("--min-profit", type=int, default=1, dest="min_profit")
+    sp.add_argument("--max-hops", type=int, default=0, dest="max_hops")
+    sp.set_defaults(func=cmd_stats)
+
+    sp = sub.add_parser("trade", help="autonomous arbitrage trader for one ship")
+    sp.add_argument("ship")
+    sp.add_argument("--min-profit", type=int, default=50, dest="min_profit",
+                    help="minimum profit per unit to take a route (default 50)")
+    sp.add_argument("--budget", type=int, help="max credits to spend per buy leg")
+    sp.add_argument("--loops", type=int, help="stop after N trade cycles")
+    sp.add_argument("--cross-system", action="store_true", dest="cross_system",
+                    help="trade across the jump-gate network, not just one system")
+    sp.add_argument("--max-hops", type=int, default=2, dest="max_hops",
+                    help="max jumps away to consider (with --cross-system, default 2)")
+    sp.set_defaults(func=cmd_trade)
+
+    sp = sub.add_parser("expand", help="autonomously buy ships while credits allow")
+    sp.add_argument("ship_type", help="e.g. SHIP_MINING_DRONE, SHIP_LIGHT_HAULER")
+    sp.add_argument("--credit-buffer", type=int, default=50000, dest="credit_buffer",
+                    help="keep at least this many credits in reserve (default 50000)")
+    sp.add_argument("--max-ships", type=int, dest="max_ships", help="stop at this fleet size")
+    sp.add_argument("--max-price", type=int, dest="max_price", help="skip if unit price exceeds this")
+    sp.add_argument("--waypoint", help="specific shipyard waypoint (else scan the system)")
+    sp.add_argument("--system", help="system to search (default: your HQ system)")
+    sp.add_argument("--loops", type=int, help="cap the number of purchase attempts")
+    sp.set_defaults(func=cmd_expand)
+
+    sp = sub.add_parser("mounts", help="list a ship's installed mounts")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_mounts)
+
+    sp = sub.add_parser("install-mount", help="install a mount (ship must be docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("mount", help="e.g. MOUNT_MINING_LASER_II, MOUNT_SURVEYOR_I")
+    sp.set_defaults(func=cmd_install_mount)
+
+    sp = sub.add_parser("remove-mount", help="remove a mount")
+    sp.add_argument("ship")
+    sp.add_argument("mount")
+    sp.set_defaults(func=cmd_remove_mount)
+
+    sp = sub.add_parser("transfer", help="transfer cargo to another ship at the same waypoint")
+    sp.add_argument("ship")
+    sp.add_argument("trade")
+    sp.add_argument("units", type=int)
+    sp.add_argument("dest", help="destination ship symbol")
+    sp.set_defaults(func=cmd_transfer)
+
+    sp = sub.add_parser("refine", help="refine raw materials in a ship's refinery")
+    sp.add_argument("ship")
+    sp.add_argument("produce", help="output good, e.g. IRON, COPPER, FUEL")
+    sp.set_defaults(func=cmd_refine)
+
+    sp = sub.add_parser("siphon", help="siphon gas at a gas giant")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_siphon)
+
+    sp = sub.add_parser("repair", help="repair a ship (docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("--quote", action="store_true", help="show price without repairing")
+    sp.set_defaults(func=cmd_repair)
+
+    sp = sub.add_parser("scrap", help="scrap a ship for credits (docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("--quote", action="store_true", help="show value without scrapping")
+    sp.set_defaults(func=cmd_scrap)
+
     return p
 
 
@@ -785,7 +1080,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
         return 0
 
-    token = args.token or config.require_agent_token()
+    import onboarding
+
+    token = args.token or onboarding.ensure_onboarded()
     c = Client(token=token)
     try:
         args.func(args, c)

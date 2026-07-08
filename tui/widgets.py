@@ -15,6 +15,7 @@ NAV_LABELS = [
     ("contracts", "3", "Contracts", "§"),
     ("markets", "4", "Markets", "$"),
     ("automation", "5", "Automate", "⚙"),
+    ("analytics", "6", "Analytics", "📈"),
 ]
 
 
@@ -268,8 +269,9 @@ class ContractCard(Container):
 
 class BotRow(Container):
     class Toggle(Message):
-        def __init__(self, symbol: str) -> None:
+        def __init__(self, symbol: str, kind: str = "mine") -> None:
             self.symbol = symbol
+            self.kind = kind
             super().__init__()
 
     def __init__(self, ship: dict, **kw):
@@ -286,20 +288,23 @@ class BotRow(Container):
         self.last_w = Static("idle", classes="bot-last")
         yield self.last_w
         with Horizontal(classes="bot-controls"):
-            yield Button("Start", id=f"bot-start-{self.symbol}", classes="btn --primary")
+            yield Button("Mine", id=f"bot-start-{self.symbol}", classes="btn --primary")
+            yield Button("Trade", id=f"bot-trade-{self.symbol}", classes="btn --gold")
             yield Button("Stop", id=f"bot-stop-{self.symbol}", classes="btn --danger", disabled=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id and (
-            event.button.id.startswith("bot-start-") or event.button.id.startswith("bot-stop-")
-        ):
-            self.post_message(self.Toggle(self.symbol))
+        bid = event.button.id or ""
+        if bid.startswith("bot-trade-"):
+            self.post_message(self.Toggle(self.symbol, "trade"))
+        elif bid.startswith("bot-start-") or bid.startswith("bot-stop-"):
+            self.post_message(self.Toggle(self.symbol, "mine"))
 
     def set_state(self, running: bool, last: str = "", mode: str = "") -> None:
         self.set_class(running, "--running")
         self.status.set("RUNNING" if running else "IDLE", "running" if running else "idle")
         try:
             self.query_one("#bot-start-" + self.symbol, Button).disabled = running
+            self.query_one("#bot-trade-" + self.symbol, Button).disabled = running
             self.query_one("#bot-stop-" + self.symbol, Button).disabled = not running
         except Exception:
             pass
