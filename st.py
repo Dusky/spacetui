@@ -143,6 +143,12 @@ def show_waypoint(w: dict) -> None:
 
 
 # -- commands ---------------------------------------------------------------
+def cmd_setup(args) -> None:
+    import onboarding
+
+    onboarding.run_wizard()
+
+
 def cmd_register(args) -> None:
     data = Client.register(args.symbol.upper(), args.faction.upper())
     token = data["token"]
@@ -822,6 +828,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", help="override ST_AGENT_TOKEN")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sp = sub.add_parser("setup", help="first-run setup: get an agent token and write .env")
+    sp.set_defaults(func=cmd_setup, raw=True)
+
     sp = sub.add_parser("register", help="register a new agent (uses account token)")
     sp.add_argument("symbol")
     sp.add_argument("faction")
@@ -1019,7 +1028,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
         return 0
 
-    token = args.token or config.require_agent_token()
+    import onboarding
+
+    token = args.token or onboarding.ensure_onboarded()
     c = Client(token=token)
     try:
         args.func(args, c)
