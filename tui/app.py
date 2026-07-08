@@ -86,29 +86,30 @@ class SpaceTradersApp(App):
 
     # -- layout ------------------------------------------------------------
     def compose(self) -> ComposeResult:
-        with Vertical(id="sidebar"):
-            yield Static("◢◣  SPACETRADERS", classes="brand")
-            yield Static("v2  ·  nebula hud", classes="brand-sub")
-            yield Static(classes="brand-rule")
-            with Vertical(classes="nav"):
-                for tab, key, label, icon in NAV_LABELS:
-                    yield Button(
-                        nav_label(icon, label, key),
-                        id=f"nav-{tab}",
-                        classes="nav-item",
-                    )
-            with Vertical(classes="agent-mini"):
-                yield Static("credits  —", classes="am-line", id="am-credits")
-                yield Static("hq       —", classes="am-line", id="am-hq")
-                yield Static("ships    —", classes="am-line", id="am-ships")
-        with Vertical(id="main"):
-            with ContentSwitcher(id="switcher", initial="agent"):
-                yield self.agent_pane
-                yield self.fleet_pane
-                yield self.contracts_pane
-                yield self.markets_pane
-                yield self.automation_pane
-                yield self.analytics_pane
+        with Horizontal(id="root"):
+            with Vertical(id="sidebar"):
+                yield Static("◢◣  SPACETRADERS", classes="brand")
+                yield Static("v2  ·  nebula hud", classes="brand-sub")
+                yield Static(classes="brand-rule")
+                with Vertical(classes="nav"):
+                    for tab, key, label, icon in NAV_LABELS:
+                        yield Button(
+                            nav_label(icon, label, key),
+                            id=f"nav-{tab}",
+                            classes="nav-item",
+                        )
+                with Vertical(classes="agent-mini"):
+                    yield Static("credits  —", classes="am-line", id="am-credits")
+                    yield Static("hq       —", classes="am-line", id="am-hq")
+                    yield Static("ships    —", classes="am-line", id="am-ships")
+            with Vertical(id="main"):
+                with ContentSwitcher(id="switcher", initial="agent"):
+                    yield self.agent_pane
+                    yield self.fleet_pane
+                    yield self.contracts_pane
+                    yield self.markets_pane
+                    yield self.automation_pane
+                    yield self.analytics_pane
         with Horizontal(id="statusbar"):
             yield Static(" MDOE ", classes="sb-item --hot", id="sb-agent")
             yield Static(" credits — ", classes="sb-item --green", id="sb-credits")
@@ -118,7 +119,7 @@ class SpaceTradersApp(App):
             yield Static(" --:--:-- ", classes="sb-item --right", id="sb-clock")
         with Horizontal(id="hintbar"):
             yield Static(
-                "  1-5 panes   j/k cycle ship   r refresh   enter clicks   q quit",
+                "  1-6 panes   j/k cycle ship   r refresh   enter clicks   q quit",
                 id="hint-text",
             )
 

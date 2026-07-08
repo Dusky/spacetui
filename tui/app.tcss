@@ -6,23 +6,24 @@
 Screen {
     background: #0a0e1a;
     color: #e6ebff;
-    layers: base overlay;
     layout: vertical;
 }
 
-/* subtle starfield-ish top hairline */
+/* top-level split: sidebar | main, filling all space above the docked bars */
 #root {
     layout: horizontal;
+    height: 1fr;
+    width: 100%;
 }
 
 /* ---------- Sidebar ---------- */
 #sidebar {
     width: 30;
+    height: 1fr;
     background: #11182b;
     border-right: solid #283358;
     layout: vertical;
     padding: 1 1 0 1;
-    layer: base;
 }
 
 .brand {
@@ -105,8 +106,11 @@ Screen {
 /* ---------- Main ---------- */
 #main {
     width: 1fr;
+    height: 1fr;
     layout: vertical;
-    layer: base;
+}
+#switcher {
+    height: 1fr;
 }
 
 .content {
@@ -155,7 +159,7 @@ Screen {
     background: #161f38;
     border: round #283358;
     border-left: heavy #22d3ee;
-    padding: 1 1;
+    padding: 0 1;
     height: 5;
     content-align: center middle;
 }
@@ -307,12 +311,10 @@ DataTable > .datatable--hover {
 
 /* ---------- Status bar ---------- */
 #statusbar {
-    dock: bottom;
     height: 1;
     background: #0c1322;
     border-top: heavy #22d3ee;
     layout: horizontal;
-    layer: base;
 }
 .sb-item {
     height: 1;
@@ -328,12 +330,10 @@ DataTable > .datatable--hover {
 
 /* hint footer */
 #hintbar {
-    dock: bottom;
     height: 1;
     background: #11182b;
     color: #5b6488;
     border-top: solid #283358;
-    layer: base;
 }
 
 /* scrollbars app-wide */
