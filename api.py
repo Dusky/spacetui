@@ -199,6 +199,58 @@ class Client:
     def cargo(self, symbol: str) -> dict:
         return self.get(f"/my/ships/{symbol}/cargo")["data"]
 
+    def transfer_cargo(
+        self, symbol: str, trade_symbol: str, units: int, dest_ship: str
+    ) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/transfer",
+            json={"tradeSymbol": trade_symbol, "units": int(units), "shipSymbol": dest_ship},
+        )["data"]
+
+    def siphon(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/siphon", json={})["data"]
+
+    def refine(self, symbol: str, produce: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/refine", json={"produce": produce})["data"]
+
+    def chart(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/chart", json={})["data"]
+
+    def scan_waypoints(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/waypoints", json={})["data"]
+
+    def scan_systems(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/systems", json={})["data"]
+
+    def scan_ships(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scan/ships", json={})["data"]
+
+    # -- refit / maintenance ----------------------------------------------
+    def ship_mounts(self, symbol: str) -> list[dict]:
+        return self.get(f"/my/ships/{symbol}/mounts")["data"]
+
+    def install_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/install", json={"symbol": mount_symbol}
+        )["data"]
+
+    def remove_mount(self, symbol: str, mount_symbol: str) -> dict:
+        return self.post(
+            f"/my/ships/{symbol}/mounts/remove", json={"symbol": mount_symbol}
+        )["data"]
+
+    def repair_cost(self, symbol: str) -> dict:
+        return self.get(f"/my/ships/{symbol}/repair")["data"]
+
+    def repair_ship(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/repair", json={})["data"]
+
+    def scrap_value(self, symbol: str) -> dict:
+        return self.get(f"/my/ships/{symbol}/scrap")["data"]
+
+    def scrap_ship(self, symbol: str) -> dict:
+        return self.post(f"/my/ships/{symbol}/scrap", json={})["data"]
+
     # -- world -------------------------------------------------------------
     def systems(self) -> list[dict]:
         return list(self.paginate("/systems"))

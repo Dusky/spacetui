@@ -226,36 +226,15 @@ def cmd_shipyard(args, c: Client) -> None:
 
 
 def cmd_buyship(args, c: Client) -> None:
+    from fleet import find_offer
+
     ship_type = args.ship_type.upper()
     system = args.system or _system_of(config.HQ) or _system_of(args.waypoint or "")
-    candidates = (
-        [args.waypoint]
-        if args.waypoint
-        else [w["symbol"] for w in c.waypoints(system, filters={"traits": "SHIPYARD"})]
-    )
-    if not candidates or candidates == [None]:
-        print(f"No shipyards found in {system}.")
-        return
-    credits = c.my_agent().get("credits", 0)
-    chosen_wp, price = None, None
-    for wp in candidates:
-        try:
-            yard = c.shipyard(_system_of(wp), wp)
-        except ApiError:
-            continue
-        for offer in yard.get("ships", []):  # live listings incl. prices
-            if offer.get("type") == ship_type:
-                chosen_wp, price = wp, offer.get("purchasePrice")
-                break
-        if chosen_wp:
-            break
-        # shipyards without a ship present list types only (no prices)
-        types = {t.get("type") if isinstance(t, dict) else t for t in yard.get("shipTypes", [])}
-        if ship_type in types:
-            chosen_wp = wp
+    chosen_wp, price = find_offer(c, system, ship_type, args.waypoint)
     if not chosen_wp:
         print(f"No shipyard in {system} sells {ship_type}.")
         return
+    credits = c.my_agent().get("credits", 0)
     if price is not None:
         if args.max_price and price > args.max_price:
             print(f"{ship_type} costs {price}c at {chosen_wp}, above --max-price {args.max_price}c.")
@@ -756,6 +735,87 @@ def cmd_trade(args, c: Client) -> None:
         print("\nTrader disengaged.")
 
 
+# -- fleet growth & refit ---------------------------------------------------
+def cmd_expand(args, c: Client) -> None:
+    from fleet import FleetManager
+
+    fm = FleetManager(
+        c,
+        args.ship_type,
+        system=args.system,
+        waypoint=args.waypoint,
+        credit_buffer=args.credit_buffer,
+        max_ships=args.max_ships,
+        max_price=args.max_price,
+        loops=args.loops,
+        on_log=lambda m: print(m),
+    )
+    try:
+        fm.run()
+    except KeyboardInterrupt:
+        fm.stop()
+        print("\nFleet manager stopped.")
+
+
+def cmd_mounts(args, c: Client) -> None:
+    for m in c.ship_mounts(args.ship):
+        print(f"  {m.get('symbol','?'):<28} {m.get('name','')}")
+
+
+def cmd_install_mount(args, c: Client) -> None:
+    c.install_mount(args.ship, args.mount)
+    print(f"Installed {args.mount} on {args.ship}.")
+
+
+def cmd_remove_mount(args, c: Client) -> None:
+    c.remove_mount(args.ship, args.mount)
+    print(f"Removed {args.mount} from {args.ship}.")
+
+
+def cmd_transfer(args, c: Client) -> None:
+    c.transfer_cargo(args.ship, args.trade, args.units, args.dest)
+    print(f"Transferred {args.units} {args.trade} from {args.ship} → {args.dest}.")
+
+
+def cmd_refine(args, c: Client) -> None:
+    data = c.refine(args.ship, args.produce.upper())
+    produced = data.get("produced", [])
+    consumed = data.get("consumed", [])
+    print(
+        f"Refined on {args.ship}: "
+        + ", ".join(f"+{p['units']} {p['tradeSymbol']}" for p in produced)
+        + (" (used " + ", ".join(f"{x['units']} {x['tradeSymbol']}" for x in consumed) + ")" if consumed else "")
+    )
+
+
+def cmd_siphon(args, c: Client) -> None:
+    c.orbit(args.ship)
+    data = c.siphon(args.ship)
+    y = data.get("siphon", {}).get("yield", {})
+    cd = data.get("cooldown", {})
+    print(f"Siphoned +{y.get('units',0)} {y.get('symbol','')} (cooldown {cd.get('totalSeconds',0)}s)")
+
+
+def cmd_repair(args, c: Client) -> None:
+    if args.quote:
+        tx = c.repair_cost(args.ship).get("transaction", {})
+        print(f"{args.ship} repair would cost {_credits(tx.get('totalPrice', 0))}.")
+        return
+    data = c.repair_ship(args.ship)
+    tx = data.get("transaction", {})
+    print(f"Repaired {args.ship} for {_credits(tx.get('totalPrice', 0))}.")
+
+
+def cmd_scrap(args, c: Client) -> None:
+    if args.quote:
+        tx = c.scrap_value(args.ship).get("transaction", {})
+        print(f"{args.ship} scrap would yield {_credits(tx.get('totalPrice', 0))}.")
+        return
+    data = c.scrap_ship(args.ship)
+    tx = data.get("transaction", {})
+    print(f"Scrapped {args.ship} for {_credits(tx.get('totalPrice', 0))}.")
+
+
 # -- entry ------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="st", description="SpaceTraders helper CLI")
@@ -891,6 +951,57 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--budget", type=int, help="max credits to spend per buy leg")
     sp.add_argument("--loops", type=int, help="stop after N trade cycles")
     sp.set_defaults(func=cmd_trade)
+
+    sp = sub.add_parser("expand", help="autonomously buy ships while credits allow")
+    sp.add_argument("ship_type", help="e.g. SHIP_MINING_DRONE, SHIP_LIGHT_HAULER")
+    sp.add_argument("--credit-buffer", type=int, default=50000, dest="credit_buffer",
+                    help="keep at least this many credits in reserve (default 50000)")
+    sp.add_argument("--max-ships", type=int, dest="max_ships", help="stop at this fleet size")
+    sp.add_argument("--max-price", type=int, dest="max_price", help="skip if unit price exceeds this")
+    sp.add_argument("--waypoint", help="specific shipyard waypoint (else scan the system)")
+    sp.add_argument("--system", help="system to search (default: your HQ system)")
+    sp.add_argument("--loops", type=int, help="cap the number of purchase attempts")
+    sp.set_defaults(func=cmd_expand)
+
+    sp = sub.add_parser("mounts", help="list a ship's installed mounts")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_mounts)
+
+    sp = sub.add_parser("install-mount", help="install a mount (ship must be docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("mount", help="e.g. MOUNT_MINING_LASER_II, MOUNT_SURVEYOR_I")
+    sp.set_defaults(func=cmd_install_mount)
+
+    sp = sub.add_parser("remove-mount", help="remove a mount")
+    sp.add_argument("ship")
+    sp.add_argument("mount")
+    sp.set_defaults(func=cmd_remove_mount)
+
+    sp = sub.add_parser("transfer", help="transfer cargo to another ship at the same waypoint")
+    sp.add_argument("ship")
+    sp.add_argument("trade")
+    sp.add_argument("units", type=int)
+    sp.add_argument("dest", help="destination ship symbol")
+    sp.set_defaults(func=cmd_transfer)
+
+    sp = sub.add_parser("refine", help="refine raw materials in a ship's refinery")
+    sp.add_argument("ship")
+    sp.add_argument("produce", help="output good, e.g. IRON, COPPER, FUEL")
+    sp.set_defaults(func=cmd_refine)
+
+    sp = sub.add_parser("siphon", help="siphon gas at a gas giant")
+    sp.add_argument("ship")
+    sp.set_defaults(func=cmd_siphon)
+
+    sp = sub.add_parser("repair", help="repair a ship (docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("--quote", action="store_true", help="show price without repairing")
+    sp.set_defaults(func=cmd_repair)
+
+    sp = sub.add_parser("scrap", help="scrap a ship for credits (docked at a shipyard)")
+    sp.add_argument("ship")
+    sp.add_argument("--quote", action="store_true", help="show value without scrapping")
+    sp.set_defaults(func=cmd_scrap)
 
     return p
 
