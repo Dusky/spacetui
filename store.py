@@ -49,6 +49,38 @@ CREATE TABLE IF NOT EXISTS jump_edges (
     to_gate     TEXT NOT NULL,
     PRIMARY KEY (from_gate, to_gate)
 );
+
+-- append-only time series (the snapshot table above keeps only latest prices)
+CREATE TABLE IF NOT EXISTS price_history (
+    waypoint       TEXT NOT NULL,
+    system         TEXT NOT NULL,
+    symbol         TEXT NOT NULL,
+    purchase_price INTEGER,
+    sell_price     INTEGER,
+    supply         TEXT,
+    activity       TEXT,
+    observed_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_price_history ON price_history (symbol, observed_at);
+
+CREATE TABLE IF NOT EXISTS credit_history (
+    observed_at REAL NOT NULL,
+    credits     INTEGER NOT NULL,
+    ship_count  INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+    observed_at    REAL NOT NULL,
+    ship           TEXT,
+    waypoint       TEXT,
+    system         TEXT,
+    action         TEXT NOT NULL,   -- 'buy' or 'sell'
+    symbol         TEXT NOT NULL,
+    units          INTEGER NOT NULL,
+    price_per_unit INTEGER,
+    total          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades (observed_at);
 """
 
 
@@ -105,6 +137,11 @@ def record_market(market: dict, conn: sqlite3.Connection | None = None) -> int:
         )
         for g in goods
     ]
+    history = [
+        (waypoint, system, g.get("symbol", ""), g.get("purchasePrice"),
+         g.get("sellPrice"), g.get("supply"), g.get("activity"), now)
+        for g in goods
+    ]
     c = conn or connect()
     with _lock:
         c.executemany(
@@ -125,8 +162,155 @@ def record_market(market: dict, conn: sqlite3.Connection | None = None) -> int:
             """,
             rows,
         )
+        c.executemany(
+            """INSERT INTO price_history
+                 (waypoint, system, symbol, purchase_price, sell_price,
+                  supply, activity, observed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            history,
+        )
         c.commit()
     return len(rows)
+
+
+def record_credits(
+    credits: int, ship_count: int = 0, conn: sqlite3.Connection | None = None
+) -> bool:
+    """Append a net-worth data point, de-duped so a stable balance doesn't spam
+    the series (skips if the last point is <30s old and unchanged)."""
+    c = conn or connect()
+    now = time.time()
+    with _lock:
+        row = c.execute(
+            "SELECT observed_at, credits FROM credit_history ORDER BY observed_at DESC LIMIT 1"
+        ).fetchone()
+        if row and row["credits"] == credits and now - row["observed_at"] < 30:
+            return False
+        c.execute(
+            "INSERT INTO credit_history (observed_at, credits, ship_count) VALUES (?, ?, ?)",
+            (now, credits, ship_count),
+        )
+        c.commit()
+    return True
+
+
+def record_trade(
+    action: str,
+    symbol: str,
+    units: int,
+    price_per_unit: int,
+    total: int,
+    *,
+    ship: str = "",
+    waypoint: str = "",
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    c = conn or connect()
+    with _lock:
+        c.execute(
+            """INSERT INTO trades
+                 (observed_at, ship, waypoint, system, action, symbol, units,
+                  price_per_unit, total)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (time.time(), ship, waypoint, _system_of(waypoint) if waypoint else "",
+             action, symbol, int(units), int(price_per_unit), int(total)),
+        )
+        c.commit()
+
+
+# -- analytics queries -----------------------------------------------------
+def credit_series(limit: int = 300, conn: sqlite3.Connection | None = None) -> list[dict]:
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            "SELECT observed_at, credits, ship_count FROM credit_history "
+            "ORDER BY observed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def price_series(
+    symbol: str,
+    waypoint: str | None = None,
+    limit: int = 300,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict]:
+    c = conn or connect()
+    sql = "SELECT observed_at, purchase_price, sell_price, waypoint FROM price_history WHERE symbol = ?"
+    params: list = [symbol]
+    if waypoint:
+        sql += " AND waypoint = ?"
+        params.append(waypoint)
+    sql += " ORDER BY observed_at DESC LIMIT ?"
+    params.append(limit)
+    with _lock:
+        rows = c.execute(sql, params).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def tracked_goods(limit: int = 12, conn: sqlite3.Connection | None = None) -> list[str]:
+    """Goods with the most price observations (best chart candidates)."""
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            "SELECT symbol, COUNT(*) n FROM price_history GROUP BY symbol "
+            "ORDER BY n DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [r["symbol"] for r in rows]
+
+
+def pnl_summary(conn: sqlite3.Connection | None = None) -> dict:
+    c = conn or connect()
+    with _lock:
+        row = c.execute(
+            """SELECT
+                 COALESCE(SUM(CASE WHEN action='buy'  THEN total END), 0) spent,
+                 COALESCE(SUM(CASE WHEN action='sell' THEN total END), 0) earned,
+                 COUNT(*) trades
+               FROM trades"""
+        ).fetchone()
+    spent, earned = row["spent"], row["earned"]
+    return {"spent": spent, "earned": earned, "net": earned - spent, "trades": row["trades"]}
+
+
+def pnl_by_good(limit: int = 8, conn: sqlite3.Connection | None = None) -> list[dict]:
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            """SELECT symbol,
+                 COALESCE(SUM(CASE WHEN action='buy'  THEN total END), 0) spent,
+                 COALESCE(SUM(CASE WHEN action='sell' THEN total END), 0) earned
+               FROM trades GROUP BY symbol"""
+        ).fetchall()
+    out = [
+        {"symbol": r["symbol"], "spent": r["spent"], "earned": r["earned"],
+         "net": r["earned"] - r["spent"]}
+        for r in rows
+    ]
+    out.sort(key=lambda d: d["net"], reverse=True)
+    return out[:limit]
+
+
+def recent_trades(limit: int = 12, conn: sqlite3.Connection | None = None) -> list[dict]:
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            "SELECT * FROM trades ORDER BY observed_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def activity_breakdown(conn: sqlite3.Connection | None = None) -> dict[str, int]:
+    """Count of latest market goods by activity level (e.g. WEAK/GROWING/STRONG)."""
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            "SELECT COALESCE(activity,'UNKNOWN') a, COUNT(*) n FROM market_observations "
+            "GROUP BY a ORDER BY n DESC"
+        ).fetchall()
+    return {r["a"]: r["n"] for r in rows}
 
 
 def record_jump_gate(gate: dict, conn: sqlite3.Connection | None = None) -> int:

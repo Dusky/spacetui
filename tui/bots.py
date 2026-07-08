@@ -258,6 +258,9 @@ class MinerBot(BaseBot):
             try:
                 data = self.c.sell(self.ship, item["symbol"], item["units"])
                 t = data.get("transaction", {})
+                store.record_trade("sell", item["symbol"], t.get("units", item["units"]),
+                                   t.get("pricePerUnit", 0), t.get("totalPrice", 0),
+                                   ship=self.ship, waypoint=market)
                 self._log(
                     f"sold {t.get('units', item['units'])} {item['symbol']} "
                     f"@ {t.get('pricePerUnit')} = {t.get('totalPrice')}c"
@@ -529,7 +532,7 @@ class TraderBot(BaseBot):
             frontier = nxt_frontier
         return None
 
-    def _buy(self, good: str, want: int, per_tx: int) -> tuple[int, int]:
+    def _buy(self, good: str, want: int, per_tx: int, waypoint: str = "") -> tuple[int, int]:
         """Buy up to ``want`` units in ``per_tx`` chunks. Returns (units, spend)."""
         bought = spent = 0
         while bought < want and not self._cancel.is_set():
@@ -543,12 +546,14 @@ class TraderBot(BaseBot):
             got = t.get("units", n)
             bought += got
             spent += t.get("totalPrice", 0)
+            store.record_trade("buy", good, got, t.get("pricePerUnit", 0),
+                               t.get("totalPrice", 0), ship=self.ship, waypoint=waypoint)
             self._log(f"bought {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
             if got < n:
                 break
         return bought, spent
 
-    def _sell(self, good: str, per_tx: int) -> tuple[int, int]:
+    def _sell(self, good: str, per_tx: int, waypoint: str = "") -> tuple[int, int]:
         """Sell all held ``good`` in ``per_tx`` chunks. Returns (units, revenue)."""
         sold = revenue = 0
         while not self._cancel.is_set():
@@ -569,6 +574,8 @@ class TraderBot(BaseBot):
             got = t.get("units", n)
             sold += got
             revenue += t.get("totalPrice", 0)
+            store.record_trade("sell", good, got, t.get("pricePerUnit", 0),
+                               t.get("totalPrice", 0), ship=self.ship, waypoint=waypoint)
             self._log(f"sold {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
         return sold, revenue
 
@@ -598,7 +605,7 @@ class TraderBot(BaseBot):
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="buy", last=f"buy {good}")
-        bought, spent = self._buy(good, want, per_tx)
+        bought, spent = self._buy(good, want, per_tx, waypoint=route["buy_wp"])
         self._record_here(buy_system, route["buy_wp"])
         if bought <= 0:
             return
@@ -612,7 +619,7 @@ class TraderBot(BaseBot):
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="sell", last=f"sell {good}")
-        sold, revenue = self._sell(good, per_tx)
+        sold, revenue = self._sell(good, per_tx, waypoint=route["sell_wp"])
         self._record_here(sell_system, route["sell_wp"])
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
 
@@ -629,7 +636,7 @@ class TraderBot(BaseBot):
         s = self._goto(s, market)
         self.c.dock(self.ship)
         for item in list(inv):
-            self._sell(item["symbol"], item.get("units", 1) or 1)
+            self._sell(item["symbol"], item.get("units", 1) or 1, waypoint=market)
         self._record_here(system, market)
 
     # -- main loop ---------------------------------------------------------

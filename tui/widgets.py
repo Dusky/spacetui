@@ -15,6 +15,7 @@ NAV_LABELS = [
     ("contracts", "3", "Contracts", "§"),
     ("markets", "4", "Markets", "$"),
     ("automation", "5", "Automate", "⚙"),
+    ("analytics", "6", "Analytics", "📈"),
 ]
 
 

@@ -18,6 +18,7 @@ from .bots import MinerBot, TraderBot
 from .theme import PAL
 from .views import (
     AgentPane,
+    AnalyticsPane,
     AutomationPane,
     ContractAction,
     ContractsPane,
@@ -46,6 +47,7 @@ class SpaceTradersApp(App):
         Binding("3", "switch('contracts')", "Contracts"),
         Binding("4", "switch('markets')", "Markets"),
         Binding("5", "switch('automation')", "Automate"),
+        Binding("6", "switch('analytics')", "Analytics"),
         Binding("j", "fleet_cycle(1)", "next ship"),
         Binding("k", "fleet_cycle(-1)", "prev ship"),
         Binding("r", "refresh", "refresh"),
@@ -72,12 +74,14 @@ class SpaceTradersApp(App):
         self.contracts_pane = ContractsPane(id="contracts")
         self.markets_pane = MarketsPane(id="markets")
         self.automation_pane = AutomationPane(id="automation")
+        self.analytics_pane = AnalyticsPane(id="analytics")
         self._panes = {
             "agent": self.agent_pane,
             "fleet": self.fleet_pane,
             "contracts": self.contracts_pane,
             "markets": self.markets_pane,
             "automation": self.automation_pane,
+            "analytics": self.analytics_pane,
         }
 
     # -- layout ------------------------------------------------------------
@@ -104,6 +108,7 @@ class SpaceTradersApp(App):
                 yield self.contracts_pane
                 yield self.markets_pane
                 yield self.automation_pane
+                yield self.analytics_pane
         with Horizontal(id="statusbar"):
             yield Static(" MDOE ", classes="sb-item --hot", id="sb-agent")
             yield Static(" credits — ", classes="sb-item --green", id="sb-credits")
@@ -154,6 +159,14 @@ class SpaceTradersApp(App):
                     self.current_contract_id = pending[0]["id"]
                 elif self.contracts:
                     self.current_contract_id = self.contracts[0]["id"]
+            try:
+                import store
+
+                store.record_credits(
+                    self.agent.get("credits", 0), self.agent.get("shipCount", 0)
+                )
+            except Exception:
+                pass
         # refresh active pane
         try:
             self._panes[self.active_tab].refresh_state(self)

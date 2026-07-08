@@ -725,6 +725,41 @@ def cmd_deals(args, c: Client) -> None:
         )
 
 
+def cmd_stats(args, c: Client) -> None:
+    from tui.charts import block_sparkline, hbar
+
+    agent = c.my_agent()
+    credits = agent.get("credits", 0)
+    store.record_credits(credits, agent.get("shipCount", 0))
+    series = [r["credits"] for r in store.credit_series(limit=200)]
+    print(f"Net worth   {_credits(credits)}")
+    if len(series) > 1:
+        print(f"  trend     {block_sparkline(series, width=40)}  ({series[0]:,} → {series[-1]:,})")
+
+    pnl = store.pnl_summary()
+    print(
+        f"\nRealized P&L  net {pnl['net']:+,}c   "
+        f"(spent {pnl['spent']:,}c · earned {pnl['earned']:,}c · {pnl['trades']} trades)"
+    )
+    by = store.pnl_by_good(limit=10)
+    if by:
+        peak = max((abs(r["net"]) for r in by), default=1) or 1
+        print("\nBy good:")
+        for r in by:
+            print(f"  {r['symbol']:<20} {hbar(r['net'], peak, 20):<20} {r['net']:+,}c")
+
+    routes = store.best_routes(
+        system=args.system, min_profit=args.min_profit, max_hops=args.max_hops
+    )
+    if routes:
+        print("\nTop routes:")
+        for r in routes[:10]:
+            print(
+                f"  {r['good']:<18} {r['buy_wp']} → {r['sell_wp']}  "
+                f"+{r['profit']:,}c  {r.get('hops', 0)}h"
+            )
+
+
 def cmd_trade(args, c: Client) -> None:
     from tui.bots import TraderBot
 
@@ -959,6 +994,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="include cross-system routes within N jumps of --system")
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_deals)
+
+    sp = sub.add_parser("stats", help="analytics: net worth, realized P&L, top routes")
+    sp.add_argument("--system", help="start system for cross-system routes")
+    sp.add_argument("--min-profit", type=int, default=1, dest="min_profit")
+    sp.add_argument("--max-hops", type=int, default=0, dest="max_hops")
+    sp.set_defaults(func=cmd_stats)
 
     sp = sub.add_parser("trade", help="autonomous arbitrage trader for one ship")
     sp.add_argument("ship")
