@@ -28,6 +28,12 @@ checklist item here in the same commit. Check it off when the TUI gains it.
   and cross-system. The TUI orchestrate button still starts with defaults — add
   the same options (an input row on the Automation pane, or a small modal).
 
+- [ ] **In-app onboarding (optional).** The web UI has an in-app setup screen
+  (paste token / register) via `POST /api/setup` → `onboarding.save_agent_token`
+  / `register_agent`. The TUI runs the same wizard as a *pre-launch terminal*
+  prompt (`ensure_onboarded`), which works fine — an in-TUI Textual screen would
+  only be a polish upgrade. Low priority.
+
 ## Notes
 
 - Backend modules (`api`, `store`, `arbitrage`, `routing`, `fleet`,

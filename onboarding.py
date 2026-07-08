@@ -101,6 +101,31 @@ def _validate_and_save(
     return token
 
 
+def save_agent_token(token: str, *, account: str = "", client_factory=Client) -> dict:
+    """Validate an agent token, persist it (+ callsign/HQ) to .env, apply at
+    runtime, and return the agent dict. Raises ApiError if the token is rejected.
+    Non-interactive — used by the web setup flow."""
+    agent = client_factory(token=token).my_agent()
+    updates = {"ST_AGENT_TOKEN": token}
+    if agent.get("symbol"):
+        updates["ST_AGENT_SYMBOL"] = agent["symbol"]
+    if agent.get("headquarters"):
+        updates["ST_HQ"] = agent["headquarters"]
+    if account:
+        updates["ST_ACCOUNT_TOKEN"] = account
+    write_env(updates)
+    _apply_runtime(token, agent.get("symbol", ""), agent.get("headquarters", ""), account)
+    return agent
+
+
+def register_agent(account_token: str, callsign: str, faction: str = "COSMIC",
+                   *, client_factory=Client) -> dict:
+    """Register a new agent and persist its token. Returns the agent dict."""
+    data = client_factory.register(callsign.upper(), (faction or "COSMIC").upper(),
+                                   account_token=account_token)
+    return save_agent_token(data["token"], account=account_token, client_factory=client_factory)
+
+
 def _valid_callsign(s: str) -> bool:
     return 3 <= len(s) <= 14 and s.replace("_", "").replace("-", "").isalnum()
 

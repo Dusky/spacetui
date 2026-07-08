@@ -85,6 +85,10 @@ SpaceTraders API traffic; every call still funnels through the shared rate
 limiter. State and logs stream to the browser over Server-Sent Events (with a
 polling fallback), so the dashboard updates instantly instead of on a timer. Binds to `127.0.0.1` by default (`--host` / `--port` to change).
 
+**First run:** if there's no agent token yet, the dashboard opens a setup screen
+— paste an agent token or register a new agent from your account token, and it
+writes `.env` for you (no terminal needed).
+
 **Phone / LAN access:** `st.py web --host 0.0.0.0` exposes it on your network.
 A token is required for non-local hosts (auto-generated and printed, or set your
 own with `--token`); open the printed `http://<ip>:8000/?token=...` link once and

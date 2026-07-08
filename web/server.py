@@ -9,22 +9,39 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 
 import config
+import onboarding
 import store
-from api import Client
+from api import ApiError, Client
 from .hub import Hub
 
 _STATIC = Path(__file__).resolve().parent / "static"
 
 
 def create_app(
-    client: Client | None = None, *, start_poller: bool = True, token: str | None = None
+    client: Client | None = None, *, start_poller: bool = True,
+    token: str | None = None, client_factory=Client,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
-    hub = Hub(client or Client(token=config.require_agent_token()))
-    app.hub = hub  # exposed for tests
-    if start_poller:
-        hub.refresh()
-        hub.start_poller()
+    _state = {"hub": None}
+
+    def ensure_hub(c) -> Hub:
+        h = Hub(c)
+        _state["hub"] = h
+        app.hub = h
+        if start_poller:
+            h.refresh()
+            h.start_poller()
+        return h
+
+    def hub():
+        return _state["hub"]
+
+    # Start with a client if we have one; otherwise run in setup mode until the
+    # browser posts credentials to /api/setup.
+    if client is not None:
+        ensure_hub(client)
+    elif config.AGENT_TOKEN:
+        ensure_hub(client_factory(token=config.AGENT_TOKEN))
 
     # -- optional token auth (for LAN / phone access) ----------------------
     def _authorized() -> bool:
@@ -60,24 +77,56 @@ def create_app(
     def static_files(name):
         return send_from_directory(_STATIC, name)
 
+    # -- first-run setup ---------------------------------------------------
+    @app.post("/api/setup")
+    def api_setup():
+        if hub() is not None:
+            return jsonify({"ok": True, "configured": True})
+        body = request.get_json(silent=True) or {}
+        try:
+            if body.get("mode") == "register":
+                agent = onboarding.register_agent(
+                    body.get("account_token", "").strip(),
+                    body.get("callsign", "").strip(),
+                    body.get("faction", "COSMIC").strip(),
+                    client_factory=client_factory,
+                )
+            else:
+                agent = onboarding.save_agent_token(
+                    body.get("token", "").strip(), client_factory=client_factory)
+        except ApiError as e:
+            return jsonify({"ok": False, "error": e.message}), 400
+        except Exception as e:  # noqa
+            return jsonify({"ok": False, "error": str(e)}), 400
+        ensure_hub(client_factory(token=config.AGENT_TOKEN))
+        return jsonify({"ok": True, "agent": agent})
+
     # -- read API ----------------------------------------------------------
     @app.get("/api/state")
     def api_state():
-        return jsonify(hub.snapshot())
+        if hub() is None:
+            return jsonify({"configured": False})
+        return jsonify({"configured": True, **hub().snapshot()})
 
     @app.get("/api/log")
     def api_log():
-        return jsonify(hub.log_lines(int(request.args.get("limit", 100))))
+        if hub() is None:
+            return jsonify([])
+        return jsonify(hub().log_lines(int(request.args.get("limit", 100))))
 
     @app.get("/api/stream")
     def api_stream():
+        h = hub()
+        if h is None:
+            return jsonify({"error": "not configured"}), 409
+
         def _sse(event, data):
             return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
         def gen():
-            q = hub.subscribe()
+            q = h.subscribe()
             try:
-                yield _sse("state", hub.snapshot())  # prime the client
+                yield _sse("state", h.snapshot())  # prime the client
                 while True:
                     try:
                         item = q.get(timeout=15)
@@ -85,7 +134,7 @@ def create_app(
                     except queue.Empty:
                         yield ": ping\n\n"  # heartbeat keeps the connection open
             finally:
-                hub.unsubscribe(q)
+                h.unsubscribe(q)
 
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -119,49 +168,62 @@ def create_app(
 
     @app.get("/api/market/<waypoint>")
     def api_market(waypoint):
+        if hub() is None:
+            return jsonify({"error": "not configured"}), 409
         system = "-".join(waypoint.split("-")[:2])
         try:
-            m = hub.c.market(system, waypoint)
+            m = hub().c.market(system, waypoint)
         except Exception as e:  # noqa
             return jsonify({"error": str(e)}), 502
         store.record_market(m)
         return jsonify(m)
 
     # -- control API -------------------------------------------------------
+    def _need_hub():
+        return jsonify({"ok": False, "error": "not configured"}), 409
+
     @app.post("/api/orchestrator")
     def api_orch():
+        if hub() is None:
+            return _need_hub()
         body = request.get_json(silent=True) or {}
         if body.get("action") == "start":
-            hub.start_orch(body)
+            hub().start_orch(body)
         else:
-            hub.stop_orch()
-        return jsonify(hub.snapshot()["orchestrator"])
+            hub().stop_orch()
+        return jsonify(hub().snapshot()["orchestrator"])
 
     @app.post("/api/bot")
     def api_bot():
+        if hub() is None:
+            return _need_hub()
         body = request.get_json(silent=True) or {}
         ship, kind = body.get("ship"), body.get("kind")
         if not ship:
             return jsonify({"ok": False, "error": "ship required"}), 400
         if kind == "stop":
-            hub.stop_bot(ship)
+            hub().stop_bot(ship)
         else:
-            hub.start_bot(ship, kind or "trade")
+            hub().start_bot(ship, kind or "trade")
         return jsonify({"ok": True})
 
     @app.post("/api/fleet")
     def api_fleet():
+        if hub() is None:
+            return _need_hub()
         body = request.get_json(silent=True) or {}
         ship = body.get("ship")
         if not ship:
             return jsonify({"ok": False, "error": "ship required"}), 400
-        result = hub.fleet_action(ship, body.get("action", ""), body.get("waypoint", ""))
+        result = hub().fleet_action(ship, body.get("action", ""), body.get("waypoint", ""))
         return jsonify(result), (200 if result.get("ok") else 400)
 
     @app.post("/api/contract")
     def api_contract():
+        if hub() is None:
+            return _need_hub()
         body = request.get_json(silent=True) or {}
-        result = hub.accept_contract(body.get("id", ""))
+        result = hub().accept_contract(body.get("id", ""))
         return jsonify(result), (200 if result.get("ok") else 400)
 
     return app

@@ -155,6 +155,52 @@ def test_control_actions_push_state(app):
     hub.unsubscribe(q)
 
 
+class SetupFactory:
+    """A client_factory whose instances validate a known-good token."""
+    AGENT = {"symbol": "NOVA", "headquarters": "X1-ZZ-A1", "credits": 175000, "shipCount": 2}
+
+    def __init__(self, token=None):
+        self.token = token
+
+    def my_agent(self):
+        from api import ApiError
+        if self.token == "good-token":
+            return dict(self.AGENT)
+        raise ApiError(401, "invalid token")
+
+    def contracts(self):
+        return []
+
+    def ships(self):
+        return []
+
+
+def test_setup_flow(monkeypatch, tmp_path):
+    import config
+    import onboarding
+    monkeypatch.setattr(config, "AGENT_TOKEN", "")            # start unconfigured
+    monkeypatch.setattr(onboarding, "ENV_PATH", tmp_path / ".env")
+
+    app = create_app(client=None, start_poller=False, client_factory=SetupFactory)
+    c = app.test_client()
+    assert c.get("/api/state").get_json() == {"configured": False}
+
+    # a bad token is rejected, still unconfigured
+    bad = c.post("/api/setup", json={"mode": "token", "token": "nope"})
+    assert bad.status_code == 400
+    assert c.get("/api/state").get_json()["configured"] is False
+
+    # a good token configures the hub and writes .env
+    ok = c.post("/api/setup", json={"mode": "token", "token": "good-token"})
+    assert ok.get_json()["ok"] is True
+    assert c.get("/api/state").get_json()["configured"] is True
+    assert "ST_AGENT_TOKEN=good-token" in (tmp_path / ".env").read_text()
+
+
+def test_state_has_configured_flag(app):
+    assert app.test_client().get("/api/state").get_json()["configured"] is True
+
+
 def test_token_auth_blocks_and_allows():
     app = create_app(FakeClient(), start_poller=False, token="sekret")
     app.hub.refresh()

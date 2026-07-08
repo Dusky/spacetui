@@ -323,25 +323,62 @@ function render() {
      automation: vAutomation, analytics: vAnalytics }[view] || vOverview)();
 }
 
+/* ---------- setup screen (first run) ---------- */
+function renderSetup() {
+  $("#nav").innerHTML = "";
+  const m = $("#main");
+  m.innerHTML = `<h2 class="title">◈ WELCOME, COMMANDER</h2><p class="sub">let's get you flying — no .env editing needed</p><div id="setup-err" class="neg"></div>`;
+  const err = (msg) => { $("#setup-err").textContent = msg || ""; };
+  const submit = async (body) => {
+    err("checking…");
+    const r = await postJSON("/api/setup", body);
+    if (r.ok) { boot(); } else { err(r.error || "setup failed"); }
+  };
+  const p1 = el("div", "panel");
+  p1.innerHTML = `<div class="phead">I HAVE AN AGENT TOKEN</div>`;
+  const r1 = el("div", "row");
+  const t = el("input"); t.placeholder = "paste agent token"; t.style.width = "420px";
+  const b1 = el("button", "btn primary", "Sign in");
+  b1.onclick = () => submit({ mode: "token", token: t.value.trim() });
+  r1.append(t, b1); p1.appendChild(r1); m.appendChild(p1);
+
+  const p2 = el("div", "panel");
+  p2.innerHTML = `<div class="phead">REGISTER A NEW AGENT</div><div class="muted" style="font-size:12px;margin-bottom:8px">needs an account token from spacetraders.io</div>`;
+  const r2 = el("div", "row");
+  const acc = el("input"); acc.placeholder = "account token"; acc.style.width = "300px";
+  const call = el("input"); call.placeholder = "callsign (3-14)"; call.style.width = "150px";
+  const fac = el("input"); fac.placeholder = "faction"; fac.value = "COSMIC"; fac.style.width = "120px";
+  const b2 = el("button", "btn gold", "Register");
+  b2.onclick = () => submit({ mode: "register", account_token: acc.value.trim(), callsign: call.value.trim(), faction: fac.value.trim() });
+  r2.append(acc, call, fac, b2); p2.appendChild(r2); m.appendChild(p2);
+}
+
 /* ---------- live updates (SSE, with polling fallback) ---------- */
-function applyState(s) { state = s; updateChrome(); render(); }
+function applyState(s) {
+  state = s;
+  if (s && s.configured === false) { renderSetup(); return; }
+  updateChrome(); render();
+}
 async function poll() {
   try { applyState(await getJSON("/api/state")); } catch (e) { /* keep last */ }
 }
-let pollTimer = null;
+let pollTimer = null, es = null;
 function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 4000); } }
 
 function connect() {
-  let es;
+  if (es) { try { es.close(); } catch (e) {} }
   try { es = new EventSource("/api/stream"); } catch (e) { startPolling(); return; }
   es.addEventListener("state", e => applyState(JSON.parse(e.data)));
   es.addEventListener("log", e => pushLog(JSON.parse(e.data)));
   es.onopen = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
-  es.onerror = () => { /* browser retries the stream; poll meanwhile */ startPolling(); };
+  es.onerror = () => { startPolling(); };
 }
 
 async function boot() {
   buildNav();
+  const s = await getJSON("/api/state").catch(() => ({ configured: false }));
+  applyState(s);
+  if (s.configured === false) { if (es) { es.close(); es = null; } return; }
   try { logBuf = await getJSON("/api/log?limit=100"); } catch (e) { logBuf = []; }
   connect();
 }
