@@ -5,9 +5,11 @@ import re
 import threading
 import time
 
+import claims
 import config
 import store
 from api import ApiError, Client
+from arbitrage import price_ceiling, price_floor, sustainable_units
 from routing import build_graph, shortest_path, system_of
 
 
@@ -534,8 +536,9 @@ class TraderBot(BaseBot):
         self.max_hops = max_hops
         self.hop_penalty = hop_penalty
 
-    def _buy(self, good: str, want: int, per_tx: int, waypoint: str = "") -> tuple[int, int]:
-        """Buy up to ``want`` units in ``per_tx`` chunks. Returns (units, spend)."""
+    def _buy(self, good, want, per_tx, waypoint="", ceiling=None) -> tuple[int, int]:
+        """Buy up to ``want`` units in ``per_tx`` chunks, stopping if the price
+        rises above ``ceiling``. Returns (units, spend)."""
         bought = spent = 0
         while bought < want and not self._cancel.is_set():
             n = min(per_tx, want - bought)
@@ -546,17 +549,22 @@ class TraderBot(BaseBot):
                 break
             t = data.get("transaction", {})
             got = t.get("units", n)
+            ppu = t.get("pricePerUnit", 0)
             bought += got
             spent += t.get("totalPrice", 0)
-            store.record_trade("buy", good, got, t.get("pricePerUnit", 0),
-                               t.get("totalPrice", 0), ship=self.ship, waypoint=waypoint)
-            self._log(f"bought {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
+            store.record_trade("buy", good, got, ppu, t.get("totalPrice", 0),
+                               ship=self.ship, waypoint=waypoint)
+            self._log(f"bought {got} {good} @ {ppu} = {t.get('totalPrice')}c")
             if got < n:
+                break
+            if ceiling is not None and ppu >= ceiling:
+                self._log(f"buy price hit {ppu} ≥ ceiling {ceiling}; stopping to protect margin")
                 break
         return bought, spent
 
-    def _sell(self, good: str, per_tx: int, waypoint: str = "") -> tuple[int, int]:
-        """Sell all held ``good`` in ``per_tx`` chunks. Returns (units, revenue)."""
+    def _sell(self, good, per_tx, waypoint="", floor=None) -> tuple[int, int]:
+        """Sell held ``good`` in ``per_tx`` chunks, stopping if the price falls
+        below ``floor`` (keeps the rest for a better market). Returns (units, revenue)."""
         sold = revenue = 0
         while not self._cancel.is_set():
             held = next(
@@ -574,17 +582,27 @@ class TraderBot(BaseBot):
                 break
             t = data.get("transaction", {})
             got = t.get("units", n)
+            ppu = t.get("pricePerUnit", 0)
             sold += got
             revenue += t.get("totalPrice", 0)
-            store.record_trade("sell", good, got, t.get("pricePerUnit", 0),
-                               t.get("totalPrice", 0), ship=self.ship, waypoint=waypoint)
-            self._log(f"sold {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
+            store.record_trade("sell", good, got, ppu, t.get("totalPrice", 0),
+                               ship=self.ship, waypoint=waypoint)
+            self._log(f"sold {got} {good} @ {ppu} = {t.get('totalPrice')}c")
+            if floor is not None and ppu <= floor:
+                self._log(f"sell price hit {ppu} ≤ floor {floor}; holding {held - got} for elsewhere")
+                break
         return sold, revenue
 
     def _execute(self, route: dict, s: dict, capacity: int) -> None:
         good = route["good"]
         per_tx = max(1, route.get("volume", 1))
-        want = capacity
+        margin = self.min_profit
+        # size the trade so we don't spike the buy market or crash the sell one
+        want = min(
+            capacity,
+            sustainable_units(route.get("volume"), route.get("buy_supply")),
+            sustainable_units(route.get("volume"), route.get("sell_supply")),
+        )
         if self.budget and route["buy"] > 0:
             want = min(want, self.budget // route["buy"])
         if want <= 0:
@@ -596,7 +614,8 @@ class TraderBot(BaseBot):
         hop_note = f"  [{route.get('hops', 0)} hop(s)]" if route.get("hops") else ""
         self._log(
             f"route {good}: buy {route['buy']} @ {route['buy_wp']} → "
-            f"sell {route['sell']} @ {route['sell_wp']} (+{route['profit']}/u){hop_note}"
+            f"sell {route['sell']} @ {route['sell_wp']} (+{route['profit']}/u, "
+            f"{want}u){hop_note}"
         )
         # buy leg — travel to the buy system first if it's elsewhere
         if system_of(route["buy_wp"]) != s.get("nav", {}).get("systemSymbol", ""):
@@ -607,10 +626,14 @@ class TraderBot(BaseBot):
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="buy", last=f"buy {good}")
-        bought, spent = self._buy(good, want, per_tx, waypoint=route["buy_wp"])
+        ceiling = price_ceiling(route["sell"], margin)
+        bought, spent = self._buy(good, want, per_tx, waypoint=route["buy_wp"], ceiling=ceiling)
         self._record_here(buy_system, route["buy_wp"])
         if bought <= 0:
             return
+        # never sell below what we actually paid, plus our margin
+        avg_buy = spent / bought if bought else route["buy"]
+        floor = price_floor(int(avg_buy), margin)
         # sell leg — travel to the sell system if different
         if sell_system != s.get("nav", {}).get("systemSymbol", ""):
             if not self._travel_to_system(sell_system):
@@ -621,7 +644,7 @@ class TraderBot(BaseBot):
         self.c.dock(self.ship)
         self._maybe_refuel()
         self._status(mode="sell", last=f"sell {good}")
-        sold, revenue = self._sell(good, per_tx, waypoint=route["sell_wp"])
+        sold, revenue = self._sell(good, per_tx, waypoint=route["sell_wp"], floor=floor)
         self._record_here(sell_system, route["sell_wp"])
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
 
@@ -673,9 +696,17 @@ class TraderBot(BaseBot):
                     system, self.min_profit, self.max_age_s,
                     max_hops=hops, hop_penalty=self.hop_penalty,
                 )
-                if routes:
-                    self._execute(routes[0], s, capacity)
+                # deconflict: take the best route no other trader has claimed
+                route = claims.pick_unclaimed(routes, self.ship) if routes else None
+                if route:
+                    claims.claim(route, self.ship)
+                    try:
+                        self._execute(route, s, capacity)
+                    finally:
+                        claims.release(route, self.ship)
                     continue
+                if routes:
+                    self._log("all profitable routes claimed by other traders; exploring")
 
                 # no known profitable route — scan an unseen market in-system
                 nxt = self._next_unscanned_market(system, here)

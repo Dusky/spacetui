@@ -113,3 +113,20 @@ def test_no_expand_without_ship_type():
     orch, _ = make_orch(client)  # expand_ship_type=None
     orch._maybe_expand(1)
     assert client.purchases == []
+
+
+class _DeadThread:
+    def is_alive(self):
+        return False
+
+
+def test_reap_dead_redeploys_halted_bot():
+    fleet = [ship("A", cargo_cap=40)]
+    orch, _ = make_orch(FakeClient(fleet))
+    orch._deploy(fleet[0])
+    assert "A" in orch.bots
+    # simulate the bot's thread having died (halted on some error)
+    orch._threads["A"] = _DeadThread()
+    orch._reap_dead()
+    assert "A" not in orch.bots  # forgotten, so the next tick redeploys it
+

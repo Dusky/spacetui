@@ -17,6 +17,48 @@ from __future__ import annotations
 
 from typing import Iterable
 
+# How many trade-volume batches a market can absorb before its price moves too
+# far, keyed by supply level. Buying from an ABUNDANT market or selling into a
+# SCARCE (high-demand) one sustains more units than a thin market.
+_ABSORPTION = {"ABUNDANT": 4, "HIGH": 3, "MODERATE": 2, "LIMITED": 1, "SCARCE": 1}
+
+
+def sustainable_units(trade_volume, supply, default_mult: int = 2) -> int:
+    """Units you can move here in one visit before the price degrades badly."""
+    tv = trade_volume or 1
+    return int(tv) * _ABSORPTION.get((supply or "").upper(), default_mult)
+
+
+def price_floor(buy_price: int, min_margin: int) -> int:
+    """Lowest sell price still worth taking (keeps at least ``min_margin``/unit)."""
+    return buy_price + max(0, min_margin)
+
+
+def price_ceiling(sell_price: int, min_margin: int) -> int:
+    """Highest buy price still worth paying (keeps at least ``min_margin``/unit)."""
+    return sell_price - max(0, min_margin)
+
+
+def _route(good, buy_sys, sell_sys, buy, sell, volume, hops, hop_penalty):
+    profit = sell["sell_price"] - buy["purchase_price"]
+    return {
+        "good": good,
+        "system": buy_sys,
+        "buy_system": buy_sys,
+        "sell_system": sell_sys,
+        "buy_wp": buy["waypoint"],
+        "sell_wp": sell["waypoint"],
+        "buy": buy["purchase_price"],
+        "sell": sell["sell_price"],
+        "buy_supply": buy.get("supply"),
+        "sell_supply": sell.get("supply"),
+        "sell_activity": sell.get("activity"),
+        "profit": profit,
+        "volume": volume,
+        "hops": hops,
+        "score": profit - hop_penalty * hops,
+    }
+
 
 def arbitrage_scan(
     observations: Iterable[dict],
@@ -61,22 +103,7 @@ def arbitrage_scan(
         )
         if profit < min_profit or volume < min_volume:
             continue
-        routes.append(
-            {
-                "good": good,
-                "system": sys_sym,
-                "buy_system": sys_sym,
-                "sell_system": sys_sym,
-                "buy_wp": buy["waypoint"],
-                "sell_wp": sell["waypoint"],
-                "buy": buy["purchase_price"],
-                "sell": sell["sell_price"],
-                "profit": profit,
-                "volume": volume,
-                "hops": 0,
-                "score": profit,
-            }
-        )
+        routes.append(_route(good, sys_sym, sys_sym, buy, sell, volume, 0, 0))
 
     routes.sort(key=lambda r: r["profit"], reverse=True)
     return routes
@@ -142,22 +169,7 @@ def cross_system_scan(
         volume = min(buy.get("trade_volume") or 1, sell.get("trade_volume") or 1)
         if volume < min_volume:
             continue
-        routes.append(
-            {
-                "good": good,
-                "system": buy["system"],
-                "buy_system": buy["system"],
-                "sell_system": sell["system"],
-                "buy_wp": buy["waypoint"],
-                "sell_wp": sell["waypoint"],
-                "buy": buy["purchase_price"],
-                "sell": sell["sell_price"],
-                "profit": profit,
-                "volume": volume,
-                "hops": hops,
-                "score": profit - hop_penalty * hops,
-            }
-        )
+        routes.append(_route(good, buy["system"], sell["system"], buy, sell, volume, hops, hop_penalty))
 
     routes.sort(key=lambda r: (-r["score"], r["hops"]))
     return routes

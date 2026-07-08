@@ -61,6 +61,7 @@ class Orchestrator:
         # how a bot is put to work; overridable for tests
         self._spawn = spawn or self._default_spawn
         self.bots: dict[str, object] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._cancel = threading.Event()
         self._sup: threading.Thread | None = None
 
@@ -100,7 +101,23 @@ class Orchestrator:
         return bot
 
     def _default_spawn(self, bot) -> None:
-        threading.Thread(target=bot.run, daemon=True, name=f"orch-{bot.ship}").start()
+        t = threading.Thread(target=bot.run, daemon=True, name=f"orch-{bot.ship}")
+        self._threads[bot.ship] = t
+        t.start()
+
+    def _reap_dead(self) -> None:
+        """Redeploy bots whose thread died (a bot that halted on some error).
+
+        Forgetting the bot here lets the next supervisor tick re-deploy a fresh
+        one, so a single failure never permanently sidelines a ship.
+        """
+        for sym in list(self.bots):
+            t = self._threads.get(sym)
+            bot = self.bots[sym]
+            if t is not None and not t.is_alive() and not bot.cancelled:
+                self.on_log(f"{sym} bot stopped unexpectedly; will redeploy")
+                self.bots.pop(sym, None)
+                self._threads.pop(sym, None)
 
     def _deploy(self, ship: dict) -> None:
         sym = ship["symbol"]
@@ -119,6 +136,7 @@ class Orchestrator:
             if sym not in ship_symbols:
                 self.bots[sym].stop()
                 self.bots.pop(sym, None)
+                self._threads.pop(sym, None)
 
     def _maybe_expand(self, ship_count: int) -> None:
         if not self.expand_ship_type:
@@ -154,6 +172,7 @@ class Orchestrator:
                     ships = self.c.ships()
                     symbols = {s["symbol"] for s in ships}
                     self._reap(symbols)
+                    self._reap_dead()
                     for ship in ships:
                         self._deploy(ship)
                     self._maybe_expand(len(ships))

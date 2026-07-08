@@ -29,6 +29,7 @@ class RateLimiter:
         self.capacity = float(capacity)
         self._tokens = float(capacity)
         self._updated = time.monotonic()
+        self._blocked_until = 0.0
         self._lock = threading.Lock()
 
     def _refill(self, now: float) -> None:
@@ -37,17 +38,26 @@ class RateLimiter:
             self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
             self._updated = now
 
+    def penalize(self, seconds: float) -> None:
+        """Back every caller off for ``seconds`` — used when the server returns a
+        429 so the whole fleet eases up, not just the one thread that saw it."""
+        with self._lock:
+            self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
+
     def acquire(self) -> None:
         # Loop because, after sleeping, another thread may have drained the
-        # bucket we were waiting on.
+        # bucket (or a penalty may still be in effect).
         while True:
             with self._lock:
                 now = time.monotonic()
                 self._refill(now)
-                if self._tokens >= 1.0:
+                if now < self._blocked_until:
+                    wait = self._blocked_until - now
+                elif self._tokens < 1.0:
+                    wait = (1.0 - self._tokens) / self.rate
+                else:
                     self._tokens -= 1.0
                     return
-                wait = (1.0 - self._tokens) / self.rate
             time.sleep(wait)
 
 

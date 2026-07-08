@@ -23,6 +23,15 @@ def test_burst_then_throttle():
     assert time.monotonic() - t0 >= 0.08  # ~0.1s, allow slack
 
 
+def test_penalize_blocks_all_callers():
+    # a 429 penalty should make even an otherwise-unthrottled limiter wait
+    rl = RateLimiter(rate=1000.0, capacity=1000)
+    rl.penalize(0.3)
+    t0 = time.monotonic()
+    rl.acquire()
+    assert time.monotonic() - t0 >= 0.25  # waited out the penalty
+
+
 def test_sustained_rate_across_threads():
     # No burst headroom (capacity 1): N acquisitions from many threads must
     # take at least (N-1)/rate seconds in aggregate.

@@ -43,12 +43,27 @@ class Client:
         retry_on_rate_limit: bool = True,
     ) -> dict:
         url = f"{self.base_url}{path}"
-        for attempt in range(3 if retry_on_rate_limit else 1):
+        # Transient failures (429, 5xx, network blips) are always retryable;
+        # retry generously so a saturated moment never kills a bot.
+        attempts = 10 if retry_on_rate_limit else 1
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
             LIMITER.acquire()
-            resp = self.session.request(method, url, params=params, json=json, timeout=30)
-            if resp.status_code == 429 and retry_on_rate_limit:
+            try:
+                resp = self.session.request(method, url, params=params, json=json, timeout=30)
+            except requests.RequestException as e:
+                if last:
+                    raise ApiError(0, f"network error: {e}")
+                time.sleep(min(1.0 + attempt, 10.0))
+                continue
+            if resp.status_code == 429 and retry_on_rate_limit and not last:
                 retry = float(resp.headers.get("Retry-After", "1") or 1)
-                time.sleep(retry)
+                # trip a global penalty so the whole fleet eases off, not just us
+                LIMITER.penalize(retry)
+                time.sleep(min(retry * (1 + 0.25 * attempt), 10.0))
+                continue
+            if resp.status_code >= 500 and retry_on_rate_limit and not last:
+                time.sleep(min(1.0 + attempt, 10.0))
                 continue
             break
 
