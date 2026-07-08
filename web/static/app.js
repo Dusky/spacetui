@@ -209,11 +209,42 @@ function vAutomation() {
   const orch = state.orchestrator || {};
   m.innerHTML = head("⚙ AUTOMATION", "orchestrate the fleet · per-ship bots · live log");
   const bar = el("div", "panel"); bar.innerHTML = `<div class="phead">FLEET ORCHESTRATOR</div>`;
-  const row = el("div", "row");
-  const btn = el("button", "btn " + (orch.running ? "danger" : "primary"), orch.running ? "■ Stop Orchestrator" : "🚀 Orchestrate Fleet");
-  btn.onclick = async () => { await postJSON("/api/orchestrator", { action: orch.running ? "stop" : "start" }); poll(); };
-  const status = el("span", "muted", orch.running ? `running · ${Object.keys(orch.roster || {}).length} deployed` : "idle");
-  row.appendChild(btn); row.appendChild(status); bar.appendChild(row); m.appendChild(bar);
+  if (orch.running) {
+    const cfg = orch.config || {};
+    const row = el("div", "row");
+    const btn = el("button", "btn danger", "■ Stop Orchestrator");
+    btn.onclick = async () => { await postJSON("/api/orchestrator", { action: "stop" }); poll(); };
+    const bits = [`${Object.keys(orch.roster || {}).length} deployed`,
+      cfg.expand ? `reinvest ${cfg.expand}` : "no reinvest",
+      `reserve ${fmt(cfg.credit_buffer)}c`,
+      cfg.max_ships ? `cap ${cfg.max_ships}` : null,
+      cfg.cross_system ? "cross-system" : null].filter(Boolean);
+    row.appendChild(btn); row.appendChild(el("span", "muted", "running · " + bits.join(" · ")));
+    bar.appendChild(row);
+  } else {
+    const cfg = el("div", "row"); cfg.style.marginBottom = "8px";
+    cfg.innerHTML = `
+      <input id="o-expand" placeholder="reinvest ship type — blank = off" style="width:280px">
+      <input id="o-buffer" type="number" placeholder="reserve" value="100000" style="width:120px">
+      <input id="o-max" type="number" placeholder="max ships" style="width:110px">
+      <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>`;
+    bar.appendChild(cfg);
+    const row = el("div", "row");
+    const btn = el("button", "btn primary", "🚀 Orchestrate Fleet");
+    btn.onclick = async () => {
+      await postJSON("/api/orchestrator", {
+        action: "start",
+        expand: $("#o-expand").value.trim().toUpperCase(),
+        credit_buffer: $("#o-buffer").value,
+        max_ships: $("#o-max").value,
+        cross_system: $("#o-cross").checked,
+      });
+      poll();
+    };
+    row.appendChild(btn); row.appendChild(el("span", "muted", "idle — deploys a bot per ship; reinvests profit if a ship type is set"));
+    bar.appendChild(row);
+  }
+  m.appendChild(bar);
 
   const grid = el("div", "grid card-grid");
   for (const s of state.ships || []) {

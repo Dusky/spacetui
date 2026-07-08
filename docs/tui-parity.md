@@ -23,10 +23,10 @@ checklist item here in the same commit. Check it off when the TUI gains it.
   routes (`store.best_routes`). The TUI surfaces routes only in Analytics; add a
   routes table to the TUI Markets pane too (or keep it Analytics-only — decide).
 
-- [ ] **Orchestrator configuration.** Both UIs currently start the orchestrator
-  with defaults. When the web UI grows controls for `--expand` ship type,
-  `--credit-buffer`, `--max-ships`, and `--cross-system`, mirror them in the TUI
-  Automation pane's orchestrate control.
+- [ ] **Orchestrator configuration.** The **web UI now** has form controls for
+  reinvest ship type (`--expand`), credit reserve (`--credit-buffer`), max ships,
+  and cross-system. The TUI orchestrate button still starts with defaults — add
+  the same options (an input row on the Automation pane, or a small modal).
 
 ## Notes
 

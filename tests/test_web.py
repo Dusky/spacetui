@@ -91,6 +91,23 @@ def test_orchestrator_toggle(app):
     assert app.hub.snapshot()["orchestrator"]["running"] is False
 
 
+def test_orchestrator_start_with_config(app):
+    c = app.test_client()
+    c.post("/api/orchestrator", json={
+        "action": "start", "expand": "SHIP_MINING_DRONE",
+        "credit_buffer": "250000", "max_ships": "8", "cross_system": True,
+    })
+    orch = app.hub.orchestrator
+    assert orch.expand_ship_type == "SHIP_MINING_DRONE"
+    assert orch.credit_buffer == 250000
+    assert orch.max_ships == 8
+    assert orch.cross_system is True
+    cfg = app.hub.snapshot()["orchestrator"]["config"]
+    assert cfg["expand"] == "SHIP_MINING_DRONE" and cfg["max_ships"] == 8
+    c.post("/api/orchestrator", json={"action": "stop"})
+    orch._sup.join(timeout=2)
+
+
 def test_fleet_action_calls_client(app):
     r = app.test_client().post("/api/fleet", json={"ship": "MDOE-1", "action": "orbit"}).get_json()
     assert r["ok"] is True

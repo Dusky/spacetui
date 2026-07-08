@@ -109,6 +109,12 @@ class Hub:
                 "orchestrator": {
                     "running": bool(orch and orch.running),
                     "roster": orch.roster() if orch else {},
+                    "config": {
+                        "expand": orch.expand_ship_type,
+                        "credit_buffer": orch.credit_buffer,
+                        "max_ships": orch.max_ships,
+                        "cross_system": orch.cross_system,
+                    } if orch else {},
                 },
                 "bots": bots,
             }
@@ -136,9 +142,9 @@ class Hub:
             return
         self.orchestrator = Orchestrator(
             self.c,
-            credit_buffer=int(opts.get("credit_buffer", 100000)),
+            credit_buffer=int(opts.get("credit_buffer") or 100000),
             expand_ship_type=opts.get("expand") or None,
-            max_ships=opts.get("max_ships"),
+            max_ships=int(opts["max_ships"]) if opts.get("max_ships") else None,
             cross_system=bool(opts.get("cross_system")),
             on_log=lambda m: self.log(m),
         )
