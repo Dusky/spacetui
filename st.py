@@ -781,6 +781,27 @@ def cmd_trade(args, c: Client) -> None:
         print("\nTrader disengaged.")
 
 
+def cmd_orchestrate(args, c: Client) -> None:
+    from orchestrator import Orchestrator
+
+    orch = Orchestrator(
+        c,
+        credit_buffer=args.credit_buffer,
+        expand_ship_type=args.expand,
+        max_ships=args.max_ships,
+        cross_system=args.cross_system,
+        on_log=lambda m: print(m),
+    )
+    print("Fleet orchestrator engaged. Ctrl+C to stop.")
+    orch.start()
+    try:
+        while orch.running:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        orch.stop()
+        print("\nOrchestrator stopped.")
+
+
 # -- fleet growth & refit ---------------------------------------------------
 def cmd_expand(args, c: Client) -> None:
     from fleet import FleetManager
@@ -1012,6 +1033,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-hops", type=int, default=2, dest="max_hops",
                     help="max jumps away to consider (with --cross-system, default 2)")
     sp.set_defaults(func=cmd_trade)
+
+    sp = sub.add_parser("orchestrate", help="run the whole fleet automatically (miners/traders/scouts)")
+    sp.add_argument("--expand", help="ship type to auto-buy with profits, e.g. SHIP_MINING_DRONE")
+    sp.add_argument("--credit-buffer", type=int, default=100000, dest="credit_buffer",
+                    help="keep at least this many credits before reinvesting (default 100000)")
+    sp.add_argument("--max-ships", type=int, dest="max_ships", help="cap the fleet size")
+    sp.add_argument("--cross-system", action="store_true", dest="cross_system",
+                    help="let traders/scouts range across the jump-gate network")
+    sp.set_defaults(func=cmd_orchestrate)
 
     sp = sub.add_parser("expand", help="autonomously buy ships while credits allow")
     sp.add_argument("ship_type", help="e.g. SHIP_MINING_DRONE, SHIP_LIGHT_HAULER")

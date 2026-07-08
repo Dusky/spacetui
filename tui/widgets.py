@@ -166,6 +166,8 @@ class ShipCard(Container):
         self.post_message(self.Selected(self.symbol))
 
     def update(self, ship: dict) -> None:
+        if not hasattr(self, "fuel_g"):  # compose hasn't run yet; next poll fills it
+            return
         nav = ship.get("nav", {})
         frame = ship.get("frame", {})
         reg = ship.get("registration", {})

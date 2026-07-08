@@ -331,9 +331,24 @@ class AutomationPane(Pane):
         self.rows: dict[str, object] = {}
 
     def body(self):
+        with Horizontal(classes="orch-bar"):
+            yield Button("🚀 Orchestrate Fleet", id="orch-toggle", classes="btn --primary")
+            self.orch_status = Static("orchestrator idle", classes="orch-status")
+            yield self.orch_status
         yield Container(classes="auto-grid", id="bot-grid")
         self.bot_log = RichLog(id="botlog", wrap=True, markup=True)
         yield Panel("BOT CONSOLE", self.bot_log, subtitle="live")
+
+    def set_orch_state(self, running: bool, detail: str = "") -> None:
+        try:
+            btn = self.query_one("#orch-toggle", Button)
+            btn.label = "■ Stop Orchestrator" if running else "🚀 Orchestrate Fleet"
+            btn.set_class(not running, "--primary")
+            btn.set_class(running, "--danger")
+            txt = ("orchestrator running · " + detail) if running else "orchestrator idle"
+            self.orch_status.update(Text(txt, style=PAL.success if running else PAL.text_muted))
+        except Exception:
+            pass
 
     def refresh_state(self, app) -> None:
         grid = self.query_one("#bot-grid", Container)

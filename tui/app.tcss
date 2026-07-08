@@ -233,7 +233,7 @@ Button {
     color: #e6ebff;
     border: round #3a4a78;
     padding: 0 1;
-    height: 1;
+    height: 3;
     min-width: 0;
 }
 Button:hover { border: round #22d3ee; color: #22d3ee; }
@@ -247,7 +247,7 @@ Button:disabled { background: #0c1322; color: #5b6488; border: round #283358; }
 .btn.--danger:hover { background: #f87171; color: #0a0e1a; }
 .btn.--ghost { background: transparent; border: round #283358; color: #8590b8; }
 
-.actions { layout: horizontal; height: 1; margin: 0 0 1 0; }
+.actions { layout: horizontal; height: auto; margin: 0 0 1 0; }
 .actions Button { margin-right: 1; }
 
 /* ---------- Contracts ---------- */
@@ -266,6 +266,9 @@ Button:disabled { background: #0c1322; color: #5b6488; border: round #283358; }
 .progress-track { height: 1; }
 
 /* ---------- Automation ---------- */
+.orch-bar { height: auto; margin-bottom: 1; align: left middle; }
+.orch-bar Button { margin-right: 2; }
+.orch-status { color: #5b6488; height: 3; content-align: left middle; }
 .auto-grid { layout: grid; grid-size: 3 1; grid-gutter: 1 1; height: auto; margin-bottom: 1; }
 .bot-row {
     background: #11182b;
@@ -278,7 +281,7 @@ Button:disabled { background: #0c1322; color: #5b6488; border: round #283358; }
 .bot-name { color: #e6ebff; text-style: bold; width: 1fr; height: 1; }
 .bot-mode { color: #5b6488; height: 1; }
 .bot-last { color: #8590b8; height: 1; }
-.bot-controls { layout: horizontal; height: 1; margin: 0 0 1 0; }
+.bot-controls { layout: horizontal; height: auto; margin: 0 0 1 0; }
 .bot-controls Button { margin-right: 1; }
 
 #botlog {

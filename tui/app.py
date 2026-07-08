@@ -63,6 +63,7 @@ class SpaceTradersApp(App):
         self.contracts: list[dict] = []
         self.current_contract_id = ""
         self.bots: dict[str, MinerBot] = {}
+        self.orchestrator = None
         self.active_tab = "agent"
         self._poll_now = threading.Event()
         self._last_poll = ""
@@ -220,6 +221,8 @@ class SpaceTradersApp(App):
         bid = event.button.id or ""
         if bid.startswith("nav-"):
             self.action_switch(bid.removeprefix("nav-"))
+        elif bid == "orch-toggle":
+            self._toggle_orchestrator()
 
     def action_fleet_cycle(self, delta: int) -> None:
         if self.active_tab != "fleet":
@@ -279,6 +282,29 @@ class SpaceTradersApp(App):
         if bot:
             bot.stop()
         self.automation_pane.set_bot_state(ship, False, last="stopped")
+
+    # -- orchestrator ------------------------------------------------------
+    def _toggle_orchestrator(self) -> None:
+        from orchestrator import Orchestrator
+
+        if self.orchestrator and self.orchestrator.running:
+            managed = list(self.orchestrator.bots)
+            self.orchestrator.stop()
+            for sym in managed:
+                self.automation_pane.set_bot_state(sym, False, last="stopped")
+            self.automation_pane.set_orch_state(False)
+            self._bot_log("orchestrator: stopping fleet")
+            return
+        self.orchestrator = Orchestrator(
+            self.client,
+            on_log=lambda m: self.call_from_thread(self._bot_log, m),
+            on_deploy=lambda sym, role: self.call_from_thread(
+                self.automation_pane.set_bot_state, sym, True, last=role, mode=role
+            ),
+        )
+        self.orchestrator.start()
+        self.automation_pane.set_orch_state(True, detail="auto-deploying")
+        self._bot_log("orchestrator: engaging fleet")
 
     def _bot_log(self, msg: str) -> None:
         try:

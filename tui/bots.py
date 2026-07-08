@@ -46,6 +46,11 @@ class BaseBot:
         self.on_log = on_log or (lambda m: None)
         self.on_status = on_status or (lambda **k: None)
         self._cancel = threading.Event()
+        # exploration defaults (subclasses override as needed)
+        self.max_age_s = 3600.0
+        self.max_hops = 2
+        self.cross_system = False
+        self._gated: set[str] = set()
 
     def stop(self) -> None:
         self._cancel.set()
@@ -120,6 +125,103 @@ class BaseBot:
             self._log("refueled")
         except ApiError as e:
             self._log(f"refuel skipped: {e.message}")
+
+    # -- market & jump-gate exploration (shared by traders and scouts) -----
+    def _record_here(self, system: str, waypoint: str) -> dict | None:
+        try:
+            m = self.c.market(system, waypoint)
+        except ApiError:
+            return None
+        n = store.record_market(m)
+        if n:
+            self._log(f"scanned {waypoint} ({n} goods)")
+        return m
+
+    def _first_market(self, system: str) -> str | None:
+        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+            return w["symbol"]
+        return None
+
+    def _next_unscanned_market(self, system: str, here: str) -> str | None:
+        fresh = {
+            o["waypoint"]
+            for o in store.latest_prices(system=system, max_age_s=self.max_age_s)
+        }
+        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+            if w["symbol"] != here and w["symbol"] not in fresh:
+                return w["symbol"]
+        return None
+
+    def _map_gate(self, system: str) -> None:
+        """Record ``system``'s jump gate and its connections (once per system)."""
+        if system in self._gated:
+            return
+        self._gated.add(system)
+        try:
+            gates = self.c.waypoints(system, filters={"type": "JUMP_GATE"})
+        except ApiError:
+            return
+        if not gates:
+            return
+        try:
+            jg = self.c.jump_gate(system, gates[0]["symbol"])
+        except ApiError:
+            return
+        n = store.record_jump_gate(jg)
+        if n:
+            self._log(f"mapped jump gate {gates[0]['symbol']} ({n} links)")
+
+    def _travel_to_system(self, target: str) -> bool:
+        """Jump-hop from the current system to ``target``. Returns success."""
+        s = self.c.ship(self.ship)
+        current = s.get("nav", {}).get("systemSymbol", "")
+        if current == target:
+            return True
+        self._map_gate(current)
+        adj, gate_of = build_graph(store.jump_edges())
+        path = shortest_path(adj, current, target)
+        if not path or len(path) < 2:
+            self._log(f"no jump route {current} → {target}")
+            return False
+        for nxt in path[1:]:
+            cur_gate, dest_gate = gate_of.get(current), gate_of.get(nxt)
+            if not cur_gate or not dest_gate:
+                self._log(f"missing gate for {current}/{nxt}")
+                return False
+            s = self._goto(s, cur_gate)
+            if s.get("nav", {}).get("status") == "DOCKED":
+                self.c.orbit(self.ship)
+            self._status(mode="jump", last=f"jump → {nxt}")
+            try:
+                self.c.jump(self.ship, dest_gate)
+            except ApiError as e:
+                self._log(f"jump failed: {e.message}")
+                return False
+            self._await_cooldown()
+            s = self._await_arrival()
+            current = nxt
+            self._map_gate(current)
+        self._log(f"arrived in {target}")
+        return True
+
+    def _next_unscanned_system(self, current: str) -> str | None:
+        """A reachable neighbour system we have no market prices for yet."""
+        adj, _ = build_graph(store.jump_edges())
+        priced = {o["system"] for o in store.latest_prices(max_age_s=self.max_age_s)}
+        frontier, seen, hops = [current], {current}, 0
+        while frontier and hops < self.max_hops:
+            hops += 1
+            nxt_frontier = []
+            for sys_sym in frontier:
+                for nb in sorted(adj.get(sys_sym, ())):
+                    if nb in seen:
+                        continue
+                    seen.add(nb)
+                    if nb not in priced:
+                        return nb
+                    nxt_frontier.append(nb)
+            frontier = nxt_frontier
+        return None
 
 
 class MinerBot(BaseBot):
@@ -431,106 +533,6 @@ class TraderBot(BaseBot):
         self.cross_system = cross_system
         self.max_hops = max_hops
         self.hop_penalty = hop_penalty
-        self._gated: set[str] = set()  # systems whose jump gate we've mapped
-
-    # -- internals ---------------------------------------------------------
-    def _record_here(self, system: str, waypoint: str) -> dict | None:
-        try:
-            m = self.c.market(system, waypoint)
-        except ApiError:
-            return None
-        n = store.record_market(m)
-        if n:
-            self._log(f"scanned {waypoint} ({n} goods)")
-        return m
-
-    def _next_unscanned_market(self, system: str, here: str) -> str | None:
-        fresh = {
-            o["waypoint"]
-            for o in store.latest_prices(system=system, max_age_s=self.max_age_s)
-        }
-        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
-            if w["symbol"] != here and w["symbol"] not in fresh:
-                return w["symbol"]
-        return None
-
-    def _first_market(self, system: str) -> str | None:
-        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
-            return w["symbol"]
-        return None
-
-    # -- jump-gate network -------------------------------------------------
-    def _map_gate(self, system: str) -> None:
-        """Record ``system``'s jump gate and its connections (once per system)."""
-        if system in self._gated:
-            return
-        self._gated.add(system)
-        try:
-            gates = self.c.waypoints(system, filters={"type": "JUMP_GATE"})
-        except ApiError:
-            return
-        if not gates:
-            return
-        try:
-            jg = self.c.jump_gate(system, gates[0]["symbol"])
-        except ApiError:
-            return
-        n = store.record_jump_gate(jg)
-        if n:
-            self._log(f"mapped jump gate {gates[0]['symbol']} ({n} links)")
-
-    def _travel_to_system(self, target: str) -> bool:
-        """Jump-hop from the current system to ``target``. Returns success."""
-        s = self.c.ship(self.ship)
-        current = s.get("nav", {}).get("systemSymbol", "")
-        if current == target:
-            return True
-        self._map_gate(current)
-        adj, gate_of = build_graph(store.jump_edges())
-        path = shortest_path(adj, current, target)
-        if not path or len(path) < 2:
-            self._log(f"no jump route {current} → {target}")
-            return False
-        for nxt in path[1:]:
-            cur_gate, dest_gate = gate_of.get(current), gate_of.get(nxt)
-            if not cur_gate or not dest_gate:
-                self._log(f"missing gate for {current}/{nxt}")
-                return False
-            s = self._goto(s, cur_gate)
-            if s.get("nav", {}).get("status") == "DOCKED":
-                self.c.orbit(self.ship)
-            self._status(mode="jump", last=f"jump → {nxt}")
-            try:
-                self.c.jump(self.ship, dest_gate)
-            except ApiError as e:
-                self._log(f"jump failed: {e.message}")
-                return False
-            self._await_cooldown()
-            s = self._await_arrival()
-            current = nxt
-            self._map_gate(current)
-        self._log(f"arrived in {target}")
-        return True
-
-    def _next_unscanned_system(self, current: str) -> str | None:
-        """A reachable neighbour system we have no market prices for yet."""
-        adj, _ = build_graph(store.jump_edges())
-        priced = {o["system"] for o in store.latest_prices(max_age_s=self.max_age_s)}
-        # breadth-first within max_hops
-        frontier, seen, hops = [current], {current}, 0
-        while frontier and hops < self.max_hops:
-            hops += 1
-            nxt_frontier = []
-            for sys_sym in frontier:
-                for nb in sorted(adj.get(sys_sym, ())):
-                    if nb in seen:
-                        continue
-                    seen.add(nb)
-                    if nb not in priced:
-                        return nb
-                    nxt_frontier.append(nb)
-            frontier = nxt_frontier
-        return None
 
     def _buy(self, good: str, want: int, per_tx: int, waypoint: str = "") -> tuple[int, int]:
         """Buy up to ``want`` units in ``per_tx`` chunks. Returns (units, spend)."""
@@ -695,6 +697,69 @@ class TraderBot(BaseBot):
                 )
                 self._status(mode="idle", last="no route")
                 self._sleep(30)
+        except BotCancelled:
+            pass
+        except Exception as e:
+            self._log(f"halted: {e!r}")
+        finally:
+            self._status(mode="stopped", last="idle")
+            self._log("disengaged")
+
+
+class ScoutBot(BaseBot):
+    """A probe/satellite that tours markets recording live prices.
+
+    Scouts carry no cargo, so instead of trading they keep the price store fresh
+    for the traders and the analytics pane. ``max_age_s`` doubles as the re-scan
+    interval: a market observed longer ago than that counts as unscanned again,
+    so the scout keeps cycling and prices never go stale.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        ship: str,
+        *,
+        cross_system: bool = False,
+        max_hops: int = 1,
+        max_age_s: float = 600.0,
+        dwell: int = 45,
+        on_log=None,
+        on_status=None,
+    ):
+        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        self.cross_system = cross_system
+        self.max_hops = max_hops
+        self.max_age_s = max_age_s
+        self.dwell = dwell
+
+    def run(self) -> None:
+        self._log("scout engaged")
+        try:
+            while not self._cancel.is_set():
+                s = self._await_arrival()
+                nav = s.get("nav", {})
+                system = nav.get("systemSymbol", "")
+                here = nav.get("waypointSymbol", "")
+
+                self._record_here(system, here)
+                if self.cross_system:
+                    self._map_gate(system)
+
+                nxt = self._next_unscanned_market(system, here)
+                if nxt:
+                    self._status(mode="scout", last=f"→ {nxt}")
+                    self._goto(s, nxt)
+                    continue
+
+                if self.cross_system:
+                    nsys = self._next_unscanned_system(system)
+                    if nsys and self._travel_to_system(nsys):
+                        continue
+
+                # everything fresh — idle, then loop to re-scan as prices age out
+                self._status(mode="scout", last="all fresh; dwelling")
+                self._sleep(self.dwell)
         except BotCancelled:
             pass
         except Exception as e:

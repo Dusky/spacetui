@@ -45,13 +45,43 @@ ST_AGENT_TOKEN=<agent token, obtained after /register>
 .venv/bin/python st.py agent
 .venv/bin/python st.py ships -v
 .venv/bin/python st.py autopilot <SHIP> --contract <ID> --sell
+.venv/bin/python st.py trade <SHIP> --cross-system     # arbitrage trader
+.venv/bin/python st.py deals                           # best known routes
+.venv/bin/python st.py stats                           # net worth / P&L dashboard
 ```
+
+## Fleet Orchestrator
+
+One command runs the whole fleet: it classifies each ship and deploys the right
+bot, auto-deploys bots to ships bought mid-run, and (optionally) reinvests
+profit into more ships.
+
+```bash
+# deploy a bot to every ship and keep them working
+.venv/bin/python st.py orchestrate
+
+# ...and reinvest profit into mining drones, keeping a 100k reserve
+.venv/bin/python st.py orchestrate --expand SHIP_MINING_DRONE --credit-buffer 100000 --max-ships 12
+```
+
+Ship roles are chosen automatically:
+
+- **miner** — has a mining laser / surveyor mount
+- **trader** — has cargo capacity (buys low, sells high; `--cross-system` to range across jump gates)
+- **scout** — a bare probe; tours markets keeping prices fresh for the traders
+
+In the TUI, the **Automate** pane has an *Orchestrate Fleet* button that does the same.
 
 ## Layout
 
 ```
-st.py          CLI + autopilot bot
-api.py         SpaceTraders v2 API client
-config.py      env-based config
-tui/           Textual TUI (app, widgets, views, bots, theme)
+st.py           CLI (fleet ops, trading, expansion, analytics)
+api.py          SpaceTraders v2 API client (shared rate limiter)
+store.py        SQLite: market prices, jump gates, trades, net-worth history
+arbitrage.py    pure same/cross-system route scanner
+routing.py      pure jump-gate graph + pathfinding
+fleet.py        ship purchasing + FleetManager
+orchestrator.py Fleet Orchestrator (classify → deploy → reinvest)
+onboarding.py   first-run setup wizard
+tui/            Textual TUI (app, widgets, views, bots, charts, theme)
 ```
