@@ -232,10 +232,12 @@ class SpaceTradersApp(App):
 
     # -- messages from panes ----------------------------------------------
     def on_fleet_action(self, msg: FleetAction) -> None:
-        self.run_worker(self._do_fleet_action, msg, thread=True, exclusive=False)
+        # run_worker's 2nd positional arg is the worker *name*, not an argument
+        # to the callable, so bind msg via a closure.
+        self.run_worker(lambda: self._do_fleet_action(msg), thread=True, exclusive=False)
 
     def on_contract_action(self, msg: ContractAction) -> None:
-        self.run_worker(self._do_contract_action, msg, thread=True, exclusive=False)
+        self.run_worker(lambda: self._do_contract_action(msg), thread=True, exclusive=False)
 
     def on_bot_row_toggle(self, msg) -> None:
         sym = msg.symbol

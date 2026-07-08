@@ -35,7 +35,9 @@ class ContractAction(Message):
 
 
 class Pane(VerticalScroll):
-    DEFAULT_CSS = "Pane { padding: 0 1; }"
+    # height:1fr binds the pane to the switcher so tall content scrolls inside
+    # it instead of overflowing and being clipped.
+    DEFAULT_CSS = "Pane { padding: 0 1; height: 1fr; }"
     title = "PANE"
     sub = ""
 
