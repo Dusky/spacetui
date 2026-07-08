@@ -14,7 +14,7 @@ from textual import work
 import config
 from api import ApiError, Client
 
-from .bots import MinerBot
+from .bots import MinerBot, TraderBot
 from .theme import PAL
 from .views import (
     AgentPane,
@@ -224,33 +224,38 @@ class SpaceTradersApp(App):
         self.run_worker(self._do_contract_action, msg, thread=True, exclusive=False)
 
     def on_bot_row_toggle(self, msg) -> None:
-        from .widgets import BotRow
-
         sym = msg.symbol
         if sym in self.bots:
             self._stop_bot(sym)
         else:
-            self._start_bot(sym)
+            self._start_bot(sym, getattr(msg, "kind", "mine"))
 
     # -- bot management ----------------------------------------------------
-    def _start_bot(self, ship: str) -> None:
+    def _start_bot(self, ship: str, kind: str = "mine") -> None:
         if ship in self.bots:
             return
-        bot = MinerBot(
-            self.client,
-            ship,
-            contract=self.current_contract_id or None,
-            sell=True,
-            on_log=lambda m: self.call_from_thread(self._bot_log, m),
-            on_status=lambda **k: self.call_from_thread(self._bot_status, ship, **k),
-        )
+        on_log = lambda m: self.call_from_thread(self._bot_log, m)
+        on_status = lambda **k: self.call_from_thread(self._bot_status, ship, **k)
+        if kind == "trade":
+            bot = TraderBot(self.client, ship, on_log=on_log, on_status=on_status)
+            started = f"{ship}  trader started"
+        else:
+            bot = MinerBot(
+                self.client,
+                ship,
+                contract=self.current_contract_id or None,
+                sell=True,
+                on_log=on_log,
+                on_status=on_status,
+            )
+            started = f"{ship}  miner started (contract={self.current_contract_id or '-'})"
         self.bots[ship] = bot
 
         def _run():
             bot.run()
 
         self.run_worker(_run, thread=True, name=f"bot-{ship}", group=f"bot-{ship}")
-        self._bot_log(f"{ship}  bot started (contract={self.current_contract_id or '-'})")
+        self._bot_log(started)
         self.automation_pane.set_bot_state(ship, True, last="starting")
 
     def _stop_bot(self, ship: str) -> None:

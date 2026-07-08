@@ -6,6 +6,7 @@ import threading
 import time
 
 import config
+import store
 from api import ApiError, Client
 
 
@@ -28,27 +29,22 @@ def _wait_seconds(ts: str | None) -> int:
         return 0
 
 
-class MinerBot:
-    """Survey-aware mining bot. Runs in a worker thread, cancellable."""
+class BaseBot:
+    """Shared machinery for cancellable worker-thread bots."""
 
     def __init__(
         self,
         client: Client,
         ship: str,
         *,
-        contract: str | None = None,
-        sell: bool = True,
         on_log=None,
         on_status=None,
     ):
         self.c = client
         self.ship = ship
-        self.contract_id = contract
-        self.sell = sell
         self.on_log = on_log or (lambda m: None)
         self.on_status = on_status or (lambda **k: None)
         self._cancel = threading.Event()
-        self.surveys: list[dict] = []
 
     def stop(self) -> None:
         self._cancel.set()
@@ -57,7 +53,6 @@ class MinerBot:
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
-    # -- internals ---------------------------------------------------------
     def _log(self, msg: str) -> None:
         self.on_log(f"{self.ship}  {msg}")
 
@@ -92,6 +87,59 @@ class MinerBot:
             self._sleep(secs + 1)
             cd = self.c.cooldown(self.ship)
 
+    def _goto(self, s: dict, waypoint: str) -> dict:
+        """Navigate to ``waypoint`` (DRIFT fallback if fuel-short) and wait."""
+        nav = s.get("nav", {})
+        if nav.get("waypointSymbol") == waypoint and nav.get("status") != "IN_TRANSIT":
+            return s
+        if nav.get("status") == "DOCKED":
+            self.c.orbit(self.ship)
+        self._status(mode="transit", last=f"→ {waypoint}")
+        try:
+            self.c.navigate(self.ship, waypoint)
+        except ApiError as e:
+            if e.code == 4203 or "fuel" in e.message.lower():
+                self.c.set_flight_mode(self.ship, "DRIFT")
+                self.c.navigate(self.ship, waypoint)
+            else:
+                raise
+        return self._await_arrival()
+
+    def _maybe_refuel(self, threshold: float = 0.4) -> None:
+        s = self.c.ship(self.ship)
+        if s.get("nav", {}).get("status") != "DOCKED":
+            return
+        fuel = s.get("fuel", {})
+        cap = fuel.get("capacity", 0)
+        if cap == 0 or fuel.get("current", 0) / cap >= threshold:
+            return
+        try:
+            self.c.refuel(self.ship)
+            self.c.set_flight_mode(self.ship, "CRUISE")
+            self._log("refueled")
+        except ApiError as e:
+            self._log(f"refuel skipped: {e.message}")
+
+
+class MinerBot(BaseBot):
+    """Survey-aware mining bot. Runs in a worker thread, cancellable."""
+
+    def __init__(
+        self,
+        client: Client,
+        ship: str,
+        *,
+        contract: str | None = None,
+        sell: bool = True,
+        on_log=None,
+        on_status=None,
+    ):
+        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        self.contract_id = contract
+        self.sell = sell
+        self.surveys: list[dict] = []
+
+    # -- internals ---------------------------------------------------------
     def _has_trait(self, system: str, wp: str, trait: str) -> bool:
         w = self.c.waypoint(system, wp)
         return any(t["symbol"] == trait for t in w.get("traits", []))
@@ -152,8 +200,8 @@ class MinerBot:
     def _sell_off(self, s: dict, contract: dict | None) -> None:
         nav = s.get("nav", {})
         inv = s.get("cargo", {}).get("inventory", [])
-        # 1) contract delivery
-        if contract and not contract.get("fulfilled"):
+        # 1) contract delivery (via the /deliver endpoint, not a market sale)
+        if contract and self.contract_id and not contract.get("fulfilled"):
             for d in contract["terms"]["deliver"]:
                 need = d["unitsRequired"] - d["unitsFulfilled"]
                 have = next((i["units"] for i in inv if i["symbol"] == d["tradeSymbol"]), 0)
@@ -163,17 +211,33 @@ class MinerBot:
                     self._log(f"deliver {take} {d['tradeSymbol']} → {dest}")
                     self._status(mode="deliver", last=f"→ {dest}")
                     if nav.get("waypointSymbol") != dest:
-                        if nav.get("status") == "DOCKED":
-                            self.c.orbit(self.ship)
-                        self.c.navigate(self.ship, dest)
-                        s = self._await_arrival()
+                        s = self._goto(s, dest)
                         nav = s["nav"]
                     if nav.get("status") != "DOCKED":
                         self.c.dock(self.ship)
-                    self.c.sell(self.ship, d["tradeSymbol"], take)
-                    self._log(f"delivered {take} {d['tradeSymbol']}")
-        # 2) sell the rest at a market
+                    try:
+                        res = self.c.deliver_contract(
+                            self.contract_id, self.ship, d["tradeSymbol"], take
+                        )
+                        contract = res.get("contract", contract)
+                        self._log(f"delivered {take} {d['tradeSymbol']}")
+                    except ApiError as e:
+                        self._log(f"deliver failed: {e.message}")
+            # 2) fulfill once every deliverable is complete
+            if contract and not contract.get("fulfilled") and all(
+                dd["unitsFulfilled"] >= dd["unitsRequired"]
+                for dd in contract["terms"]["deliver"]
+            ):
+                try:
+                    fres = self.c.fulfill_contract(self.contract_id)
+                    paid = fres.get("agent", {}).get("credits")
+                    self._log(f"contract fulfilled ✓ (credits {paid})")
+                    self.contract_id = None
+                except ApiError as e:
+                    self._log(f"fulfill failed: {e.message}")
+        # 3) sell the rest at a market
         s = self.c.ship(self.ship)
+        nav = s.get("nav", {})
         inv = s.get("cargo", {}).get("inventory", [])
         if not inv:
             return
@@ -184,18 +248,11 @@ class MinerBot:
         if not market:
             self._log("no marketplace to sell at")
             return
-        if s["nav"]["waypointSymbol"] != market:
-            if s["nav"]["status"] == "DOCKED":
-                self.c.orbit(self.ship)
+        if nav["waypointSymbol"] != market:
             self._status(mode="sell", last=f"→ {market}")
-            self.c.navigate(self.ship, market)
-            s = self._await_arrival()
+            s = self._goto(s, market)
         self.c.dock(self.ship)
-        try:
-            self.c.refuel(self.ship)
-            self.c.set_flight_mode(self.ship, "CRUISE")
-        except ApiError:
-            pass
+        self._maybe_refuel()
         for item in inv:
             try:
                 data = self.c.sell(self.ship, item["symbol"], item["units"])
@@ -206,6 +263,11 @@ class MinerBot:
                 )
             except ApiError as e:
                 self._log(f"can't sell {item['symbol']}: {e.message}")
+        # record the fresh prices we just saw here
+        try:
+            store.record_market(self.c.market(nav["systemSymbol"], market))
+        except ApiError:
+            pass
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -325,6 +387,200 @@ class MinerBot:
                     self.surveys = [
                         sv for sv in self.surveys if sv.get("signature") != chosen.get("signature")
                     ]
+        except BotCancelled:
+            pass
+        except Exception as e:
+            self._log(f"halted: {e!r}")
+        finally:
+            self._status(mode="stopped", last="idle")
+            self._log("disengaged")
+
+
+class TraderBot(BaseBot):
+    """Autonomous arbitrage trader.
+
+    Records the price of every market it visits into ``store``, then buys the
+    most profitable good in its current system and sells it for a gain,
+    exploring unseen markets when it has no profitable route yet.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        ship: str,
+        *,
+        min_profit: int = 50,
+        budget: int | None = None,
+        max_age_s: float = 3600.0,
+        loops: int | None = None,
+        on_log=None,
+        on_status=None,
+    ):
+        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        self.min_profit = min_profit
+        self.budget = budget
+        self.max_age_s = max_age_s
+        self.loops = loops
+
+    # -- internals ---------------------------------------------------------
+    def _record_here(self, system: str, waypoint: str) -> dict | None:
+        try:
+            m = self.c.market(system, waypoint)
+        except ApiError:
+            return None
+        n = store.record_market(m)
+        if n:
+            self._log(f"scanned {waypoint} ({n} goods)")
+        return m
+
+    def _next_unscanned_market(self, system: str, here: str) -> str | None:
+        fresh = {
+            o["waypoint"]
+            for o in store.latest_prices(system=system, max_age_s=self.max_age_s)
+        }
+        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+            if w["symbol"] != here and w["symbol"] not in fresh:
+                return w["symbol"]
+        return None
+
+    def _first_market(self, system: str) -> str | None:
+        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+            return w["symbol"]
+        return None
+
+    def _buy(self, good: str, want: int, per_tx: int) -> tuple[int, int]:
+        """Buy up to ``want`` units in ``per_tx`` chunks. Returns (units, spend)."""
+        bought = spent = 0
+        while bought < want and not self._cancel.is_set():
+            n = min(per_tx, want - bought)
+            try:
+                data = self.c.purchase(self.ship, good, n)
+            except ApiError as e:
+                self._log(f"buy stopped: {e.message}")
+                break
+            t = data.get("transaction", {})
+            got = t.get("units", n)
+            bought += got
+            spent += t.get("totalPrice", 0)
+            self._log(f"bought {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
+            if got < n:
+                break
+        return bought, spent
+
+    def _sell(self, good: str, per_tx: int) -> tuple[int, int]:
+        """Sell all held ``good`` in ``per_tx`` chunks. Returns (units, revenue)."""
+        sold = revenue = 0
+        while not self._cancel.is_set():
+            held = next(
+                (i["units"] for i in self.c.cargo(self.ship).get("inventory", [])
+                 if i["symbol"] == good),
+                0,
+            )
+            if held <= 0:
+                break
+            n = min(per_tx, held)
+            try:
+                data = self.c.sell(self.ship, good, n)
+            except ApiError as e:
+                self._log(f"sell stopped: {e.message}")
+                break
+            t = data.get("transaction", {})
+            got = t.get("units", n)
+            sold += got
+            revenue += t.get("totalPrice", 0)
+            self._log(f"sold {got} {good} @ {t.get('pricePerUnit')} = {t.get('totalPrice')}c")
+        return sold, revenue
+
+    def _execute(self, route: dict, s: dict, capacity: int) -> None:
+        good = route["good"]
+        per_tx = max(1, route.get("volume", 1))
+        want = capacity
+        if self.budget and route["buy"] > 0:
+            want = min(want, self.budget // route["buy"])
+        if want <= 0:
+            self._log(f"budget too small for {good} @ {route['buy']}c")
+            self._sleep(15)
+            return
+        self._log(
+            f"route {good}: buy {route['buy']} @ {route['buy_wp']} → "
+            f"sell {route['sell']} @ {route['sell_wp']} (+{route['profit']}/u)"
+        )
+        # buy leg
+        s = self._goto(s, route["buy_wp"])
+        self.c.dock(self.ship)
+        self._maybe_refuel()
+        self._status(mode="buy", last=f"buy {good}")
+        bought, spent = self._buy(good, want, per_tx)
+        self._record_here(route["system"], route["buy_wp"])
+        if bought <= 0:
+            return
+        # sell leg
+        s = self._goto(s, route["sell_wp"])
+        self.c.dock(self.ship)
+        self._maybe_refuel()
+        self._status(mode="sell", last=f"sell {good}")
+        sold, revenue = self._sell(good, per_tx)
+        self._record_here(route["system"], route["sell_wp"])
+        self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
+
+    def _offload(self, s: dict, system: str) -> None:
+        """Sell any leftover cargo (e.g. from an interrupted trade)."""
+        inv = s.get("cargo", {}).get("inventory", [])
+        if not inv:
+            return
+        market = self._first_market(system)
+        if not market:
+            self._log("leftover cargo but no market to sell at")
+            return
+        self._log(f"offloading leftover cargo → {market}")
+        s = self._goto(s, market)
+        self.c.dock(self.ship)
+        for item in list(inv):
+            self._sell(item["symbol"], item.get("units", 1) or 1)
+        self._record_here(system, market)
+
+    # -- main loop ---------------------------------------------------------
+    def run(self) -> None:
+        self._log("trader engaged")
+        iteration = 0
+        try:
+            while not self._cancel.is_set():
+                if self.loops is not None and iteration >= self.loops:
+                    break
+                iteration += 1
+                s = self._await_arrival()
+                nav = s.get("nav", {})
+                system = nav.get("systemSymbol", "")
+                here = nav.get("waypointSymbol", "")
+                cargo = s.get("cargo", {})
+                capacity = cargo.get("capacity", 0)
+                units = cargo.get("units", 0)
+
+                # record where we are, if it's a market
+                self._record_here(system, here)
+
+                # clear leftover cargo before starting a fresh trade
+                if units > 0:
+                    self._offload(s, system)
+                    continue
+
+                routes = store.best_routes(system, self.min_profit, self.max_age_s)
+                if routes:
+                    self._execute(routes[0], s, capacity)
+                    continue
+
+                # no known profitable route — go scan an unseen market
+                nxt = self._next_unscanned_market(system, here)
+                if nxt:
+                    self._log(f"exploring markets → {nxt}")
+                    self._goto(s, nxt)
+                    continue
+
+                self._log(
+                    f"no route ≥ {self.min_profit}c in {system}; waiting for prices to move"
+                )
+                self._status(mode="idle", last="no route")
+                self._sleep(30)
         except BotCancelled:
             pass
         except Exception as e:

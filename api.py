@@ -6,6 +6,7 @@ from typing import Any, Iterator
 import requests
 
 import config
+from ratelimit import LIMITER
 
 
 class ApiError(Exception):
@@ -43,6 +44,7 @@ class Client:
     ) -> dict:
         url = f"{self.base_url}{path}"
         for attempt in range(3 if retry_on_rate_limit else 1):
+            LIMITER.acquire()
             resp = self.session.request(method, url, params=params, json=json, timeout=30)
             if resp.status_code == 429 and retry_on_rate_limit:
                 retry = float(resp.headers.get("Retry-After", "1") or 1)
@@ -106,12 +108,30 @@ class Client:
     def negotiate_contract(self, ship_symbol: str) -> dict:
         return self.post(f"/my/ships/{ship_symbol}/negotiate/contract", json={})["data"]
 
+    def deliver_contract(
+        self, contract_id: str, ship_symbol: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/my/contracts/{contract_id}/deliver",
+            json={
+                "shipSymbol": ship_symbol,
+                "tradeSymbol": trade_symbol,
+                "units": int(units),
+            },
+        )["data"]
+
     def fulfill_contract(self, contract_id: str) -> dict:
         return self.post(f"/my/contracts/{contract_id}/fulfill", json={})["data"]
 
     # -- ships -------------------------------------------------------------
     def ships(self) -> list[dict]:
         return list(self.paginate("/my/ships"))
+
+    def purchase_ship(self, ship_type: str, waypoint: str) -> dict:
+        return self.post(
+            "/my/ships",
+            json={"shipType": ship_type, "waypointSymbol": waypoint},
+        )["data"]
 
     def ship(self, symbol: str) -> dict:
         return self.get(f"/my/ships/{symbol}")["data"]
@@ -209,6 +229,7 @@ class Client:
         token = account_token or config.ACCOUNT_TOKEN
         if not token:
             raise SystemExit("No ST_ACCOUNT_TOKEN in .env; cannot register.")
+        LIMITER.acquire()
         resp = requests.post(
             f"{config.BASE_URL}/register",
             json={"symbol": symbol, "faction": faction},
