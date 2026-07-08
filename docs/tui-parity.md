@@ -28,7 +28,9 @@ checklist item here in the same commit. Check it off when the TUI gains it.
   cross-system, and **auto-contracts**. The TUI orchestrate button still starts
   with defaults — add the same options (an input row on the Automation pane, or a
   small modal). Backend supports them all already
-  (`Orchestrator(..., auto_contracts=...)`).
+  (`Orchestrator(..., auto_contracts=...)`). The web reinvest control is a live
+  **dropdown** of ship types your shipyards sell (`GET /api/shiptypes`) — the TUI
+  version could do the same via `fleet.find_offer` / `Client.shipyard`.
 
 - [ ] **In-app onboarding (optional).** The web UI has an in-app setup screen
   (paste token / register) via `POST /api/setup` → `onboarding.save_agent_token`

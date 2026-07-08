@@ -46,12 +46,20 @@ class FakeClient:
 
     def waypoints(self, system, filters=None):
         self.calls.append(("waypoints", system))
+        if filters and filters.get("traits") == "SHIPYARD":
+            return [{"symbol": "X1-AF2-YARD", "type": "ORBITAL_STATION", "x": 0, "y": 0,
+                     "traits": [{"symbol": "SHIPYARD"}]}]
         return [
             {"symbol": "X1-AF2-A1", "type": "PLANET", "x": 10, "y": 5,
              "traits": [{"symbol": "MARKETPLACE"}]},
             {"symbol": "X1-AF2-B2", "type": "ASTEROID_FIELD", "x": -8, "y": 12,
              "traits": [{"symbol": "MINERAL_DEPOSITS"}]},
         ]
+
+    def shipyard(self, system, wp):
+        return {"symbol": wp, "ships": [
+            {"type": "SHIP_MINING_DRONE", "purchasePrice": 60000},
+            {"type": "SHIP_LIGHT_HAULER", "purchasePrice": 180000}]}
 
 
 @pytest.fixture
@@ -221,6 +229,14 @@ def test_system_map_endpoint_and_cache(app):
     n = sum(1 for x in app.hub.c.calls if x[0] == "waypoints")
     c.get("/api/system/X1-AF2")  # second call is cached
     assert sum(1 for x in app.hub.c.calls if x[0] == "waypoints") == n
+
+
+def test_shiptypes_endpoint(app):
+    r = app.test_client().get("/api/shiptypes").get_json()
+    types = {x["type"] for x in r}
+    assert {"SHIP_MINING_DRONE", "SHIP_LIGHT_HAULER"} <= types
+    drone = next(x for x in r if x["type"] == "SHIP_MINING_DRONE")
+    assert drone["price"] == 60000
 
 
 def test_price_series_endpoint(app):

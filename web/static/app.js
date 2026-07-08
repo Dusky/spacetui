@@ -283,6 +283,14 @@ async function vMarkets() {
   m.appendChild(look);
 }
 
+let shipTypes = null;  // cached list of {type, price} for the reinvest dropdown
+function fillShipTypes(sel) {
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">reinvest: — off —</option>` +
+    (shipTypes || []).map(s => `<option value="${s.type}">${s.type}${s.price ? ` (${fmt(s.price)}c)` : ""}</option>`).join("");
+  sel.value = cur;
+}
+
 /* ---------- system map ---------- */
 let mapData = {};      // system -> {waypoints, links}
 let mapWpPos = [];     // hit-test cache: [{p, sx, sy, r}]
@@ -421,12 +429,15 @@ function vAutomation() {
   } else {
     const cfg = el("div", "row"); cfg.style.marginBottom = "8px";
     cfg.innerHTML = `
-      <input id="o-expand" placeholder="reinvest ship type — blank = off" style="width:280px">
+      <select id="o-expand" style="width:300px"><option value="">reinvest: — off —</option></select>
       <input id="o-buffer" type="number" placeholder="reserve" value="100000" style="width:120px">
       <input id="o-max" type="number" placeholder="max ships" style="width:110px">
       <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>
       <label class="muted"><input id="o-contracts" type="checkbox"> auto-contracts</label>`;
     bar.appendChild(cfg);
+    // populate the reinvest dropdown from ship types your shipyards actually sell
+    if (shipTypes) fillShipTypes($("#o-expand"));
+    else getJSON("/api/shiptypes").then(t => { shipTypes = t; const s = $("#o-expand"); if (s) fillShipTypes(s); });
     const row = el("div", "row");
     const btn = el("button", "btn primary", "🚀 Orchestrate Fleet");
     btn.onclick = async () => {

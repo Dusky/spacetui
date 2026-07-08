@@ -41,6 +41,37 @@ class Hub:
         self._stop = threading.Event()
         self._subs: set = set()  # SSE subscriber queues
         self._wp_cache: dict[str, tuple[list, float]] = {}  # system -> (waypoints, ts)
+        self._yard_cache: dict[str, tuple[list, float]] = {}  # system -> (shiptypes, ts)
+
+    # -- ship types for sale (feeds the reinvest dropdown) -----------------
+    def ship_types(self, system: str | None = None, max_age: float = 600.0) -> list[dict]:
+        system = system or "-".join((self.hq or "").split("-")[:2])
+        if not system:
+            return []
+        hit = self._yard_cache.get(system)
+        if hit and time.time() - hit[1] < max_age:
+            return hit[0]
+        found: dict[str, int | None] = {}
+        try:
+            yards = self.c.waypoints(system, filters={"traits": "SHIPYARD"})
+        except Exception:
+            yards = []
+        for wp in yards:
+            try:
+                yard = self.c.shipyard(system, wp["symbol"])
+            except Exception:
+                continue
+            for offer in yard.get("ships", []):  # live listings w/ price
+                t = offer.get("type")
+                if t:
+                    found[t] = offer.get("purchasePrice")
+            for st in yard.get("shipTypes", []):  # types only (no ship present)
+                t = st.get("type") if isinstance(st, dict) else st
+                if t and t not in found:
+                    found[t] = None
+        out = [{"type": t, "price": found[t]} for t in sorted(found)]
+        self._yard_cache[system] = (out, time.time())
+        return out
 
     # -- system waypoints (cached; the map view reads these) ---------------
     def system_waypoints(self, system: str, max_age: float = 600.0) -> list[dict]:

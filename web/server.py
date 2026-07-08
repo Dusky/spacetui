@@ -171,6 +171,12 @@ def create_app(
     def api_price(good):
         return jsonify(store.price_series(good, limit=300))
 
+    @app.get("/api/shiptypes")
+    def api_shiptypes():
+        if hub() is None:
+            return jsonify([])
+        return jsonify(hub().ship_types())
+
     @app.get("/api/system/<system>")
     def api_system(system):
         if hub() is None:
