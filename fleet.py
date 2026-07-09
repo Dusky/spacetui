@@ -37,6 +37,69 @@ def plan_expansion(
     return max(0, int(by_budget))
 
 
+def ship_type_role(ship_type: str) -> str:
+    """Map a purchasable ship type to the role it fills (mirrors
+    ``orchestrator.classify_ship`` but off the type name, pre-purchase)."""
+    t = (ship_type or "").upper()
+    if "PROBE" in t or "SATELLITE" in t:
+        return "scout"
+    if "MINING" in t or "DRONE" in t or "EXTRACTOR" in t or "SIPHON" in t:
+        return "miner"
+    return "trader"  # haulers, shuttles, freighters, command frigates
+
+
+def pick_expansion_type(
+    roster: dict[str, str],
+    ship_types: list[dict],
+    *,
+    haulers_per_miner: float = 0.5,
+    want_scout: bool = True,
+) -> str | None:
+    """Choose which ship type to buy next to relieve the fleet's bottleneck.
+
+    ``roster`` is ship→role; ``ship_types`` is ``[{"type","price"}]`` the local
+    shipyards sell. The heuristic keeps miners fed by haulers and the price
+    store fresh with a scout:
+
+    - no scout yet and one is for sale → buy the scout (cheap eyes first);
+    - too few haulers for the miners we have → buy a trader;
+    - otherwise raise raw throughput with a miner;
+    - fall back to whatever role has an offer.
+
+    Returns the cheapest ship type for the chosen role, or ``None`` if the
+    shipyards sell nothing useful.
+    """
+    by_role: dict[str, list[dict]] = {}
+    for st in ship_types:
+        role = ship_type_role(st.get("type", ""))
+        by_role.setdefault(role, []).append(st)
+
+    def cheapest(role: str) -> str | None:
+        offers = by_role.get(role)
+        if not offers:
+            return None
+        offers = sorted(offers, key=lambda s: (s.get("price") is None, s.get("price") or 0))
+        return offers[0].get("type")
+
+    counts = {"miner": 0, "trader": 0, "scout": 0}
+    for role in roster.values():
+        if role in counts:
+            counts[role] += 1
+
+    order: list[str] = []
+    if want_scout and counts["scout"] == 0:
+        order.append("scout")
+    if counts["trader"] < counts["miner"] * haulers_per_miner:
+        order.append("trader")
+    order += ["miner", "trader", "scout"]
+
+    for role in order:
+        pick = cheapest(role)
+        if pick:
+            return pick
+    return None
+
+
 def _system_of(waypoint: str) -> str:
     parts = waypoint.split("-")
     return "-".join(parts[:2]) if len(parts) >= 2 else waypoint

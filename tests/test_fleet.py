@@ -3,7 +3,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fleet import FleetManager, find_offer, plan_expansion
+from fleet import (
+    FleetManager,
+    find_offer,
+    pick_expansion_type,
+    plan_expansion,
+    ship_type_role,
+)
 
 
 def test_plan_expansion_respects_buffer():
@@ -24,6 +30,42 @@ def test_plan_expansion_respects_max_ships():
 def test_plan_expansion_guards_bad_price():
     assert plan_expansion(1_000_000, 0, unit_price=0) == 0
     assert plan_expansion(1_000_000, 0, unit_price=-5) == 0
+
+
+def test_ship_type_role_classification():
+    assert ship_type_role("SHIP_MINING_DRONE") == "miner"
+    assert ship_type_role("SHIP_SIPHON_DRONE") == "miner"
+    assert ship_type_role("SHIP_PROBE") == "scout"
+    assert ship_type_role("SHIP_LIGHT_HAULER") == "trader"
+    assert ship_type_role("SHIP_COMMAND_FRIGATE") == "trader"
+
+
+TYPES = [
+    {"type": "SHIP_MINING_DRONE", "price": 60_000},
+    {"type": "SHIP_LIGHT_HAULER", "price": 180_000},
+    {"type": "SHIP_PROBE", "price": 25_000},
+]
+
+
+def test_expansion_buys_scout_first_when_missing():
+    roster = {"A": "miner", "B": "miner"}
+    assert pick_expansion_type(roster, TYPES) == "SHIP_PROBE"
+
+
+def test_expansion_buys_hauler_when_miners_outnumber_traders():
+    # a scout already exists; 4 miners but 1 trader -> need more hauling
+    roster = {"A": "miner", "B": "miner", "C": "miner", "D": "miner",
+              "E": "trader", "S": "scout"}
+    assert pick_expansion_type(roster, TYPES) == "SHIP_LIGHT_HAULER"
+
+
+def test_expansion_defaults_to_miner_when_balanced():
+    roster = {"A": "miner", "T": "trader", "S": "scout"}
+    assert pick_expansion_type(roster, TYPES) == "SHIP_MINING_DRONE"
+
+
+def test_expansion_none_when_nothing_for_sale():
+    assert pick_expansion_type({"A": "miner"}, []) is None
 
 
 class FakeClient:

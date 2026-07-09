@@ -22,11 +22,70 @@ from typing import Iterable
 # SCARCE (high-demand) one sustains more units than a thin market.
 _ABSORPTION = {"ABUNDANT": 4, "HIGH": 3, "MODERATE": 2, "LIMITED": 1, "SCARCE": 1}
 
+# Rough trip-time model for ranking routes by *rate* rather than raw margin. A
+# short in-system hop still costs the fixed overhead (dock, buy, sell, refuel);
+# each jump adds travel + cooldown. These are estimates — the trader sizes and
+# times the real trip itself — but they let the scanner prefer a fast small
+# margin over a slow fat one.
+DEFAULT_CARGO = 40
+HOP_SECONDS = 90.0
+TRIP_OVERHEAD_SECONDS = 60.0
+
 
 def sustainable_units(trade_volume, supply, default_mult: int = 2) -> int:
     """Units you can move here in one visit before the price degrades badly."""
     tv = trade_volume or 1
     return int(tv) * _ABSORPTION.get((supply or "").upper(), default_mult)
+
+
+def route_units(route: dict, cargo_capacity: int = DEFAULT_CARGO) -> int:
+    """Units a ship of ``cargo_capacity`` could actually move on this route,
+    bounded by both markets' absorption."""
+    return max(0, min(
+        cargo_capacity,
+        sustainable_units(route.get("volume"), route.get("buy_supply")),
+        sustainable_units(route.get("volume"), route.get("sell_supply")),
+    ))
+
+
+def estimate_route_rate(
+    route: dict,
+    *,
+    cargo_capacity: int = DEFAULT_CARGO,
+    hop_seconds: float = HOP_SECONDS,
+    overhead_seconds: float = TRIP_OVERHEAD_SECONDS,
+) -> float:
+    """Estimated **credits per hour** for one round of this route.
+
+    ``profit_per_unit × units_moved ÷ trip_time``. Trip time is a fixed
+    per-trip overhead plus a cost per jump hop, so at equal margin a nearer,
+    higher-throughput route outranks a distant, thin one.
+    """
+    units = route_units(route, cargo_capacity)
+    profit = route.get("profit", 0)
+    trip = overhead_seconds + hop_seconds * max(0, route.get("hops", 0) or 0)
+    if trip <= 0:
+        trip = 1.0
+    return (profit * units) / trip * 3600.0
+
+
+def demand_factor(sell_points) -> float:
+    """A 0<f≤1 multiplier that shrinks order size when a market is being flooded.
+
+    Given recent sell prices (oldest→newest) for a good at the sell waypoint, a
+    falling trend means our own fills are depressing the price, so we ease off;
+    a flat or rising trend leaves the size untouched (``1.0``).
+    """
+    pts = [p for p in sell_points if p]
+    if len(pts) < 2:
+        return 1.0
+    first, last = pts[0], pts[-1]
+    if first <= 0:
+        return 1.0
+    change = (last - first) / first  # negative when the price is sliding
+    if change >= 0:
+        return 1.0
+    return max(0.25, 1.0 + change)
 
 
 def price_floor(buy_price: int, min_margin: int) -> int:
@@ -41,7 +100,7 @@ def price_ceiling(sell_price: int, min_margin: int) -> int:
 
 def _route(good, buy_sys, sell_sys, buy, sell, volume, hops, hop_penalty):
     profit = sell["sell_price"] - buy["purchase_price"]
-    return {
+    r = {
         "good": good,
         "system": buy_sys,
         "buy_system": buy_sys,
@@ -58,6 +117,8 @@ def _route(good, buy_sys, sell_sys, buy, sell, volume, hops, hop_penalty):
         "hops": hops,
         "score": profit - hop_penalty * hops,
     }
+    r["rate"] = estimate_route_rate(r)  # est. credits/hour, for ranking
+    return r
 
 
 def arbitrage_scan(
@@ -105,7 +166,8 @@ def arbitrage_scan(
             continue
         routes.append(_route(good, sys_sym, sys_sym, buy, sell, volume, 0, 0))
 
-    routes.sort(key=lambda r: r["profit"], reverse=True)
+    # rank by estimated credits/hour; profit breaks ties (same-system => same trip)
+    routes.sort(key=lambda r: (r["rate"], r["profit"]), reverse=True)
     return routes
 
 
@@ -171,5 +233,7 @@ def cross_system_scan(
             continue
         routes.append(_route(good, buy["system"], sell["system"], buy, sell, volume, hops, hop_penalty))
 
-    routes.sort(key=lambda r: (-r["score"], r["hops"]))
+    # rank by estimated credits/hour (which already discounts distant hops),
+    # then by fewest hops, then by the penalty-adjusted score
+    routes.sort(key=lambda r: (-r["rate"], r["hops"], -r["score"]))
     return routes

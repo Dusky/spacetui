@@ -10,7 +10,7 @@ import config
 import store
 import world as world_mod
 from api import ApiError, Client
-from arbitrage import price_ceiling, price_floor, sustainable_units
+from arbitrage import demand_factor, price_ceiling, price_floor, sustainable_units
 from routing import build_graph, shortest_path, system_of
 
 
@@ -638,6 +638,15 @@ class TraderBot(BaseBot):
             sustainable_units(route.get("volume"), route.get("buy_supply")),
             sustainable_units(route.get("volume"), route.get("sell_supply")),
         )
+        # ease off further if our recent fills have been depressing the sell price
+        sell_pts = [
+            r["sell_price"]
+            for r in store.price_series(good, waypoint=route["sell_wp"], limit=8)
+        ]
+        factor = demand_factor(sell_pts)
+        if factor < 1.0 and want > 1:
+            want = max(1, int(want * factor))
+            self._log(f"easing {good} order to {want}u ({int(factor * 100)}%): sell price softening")
         if self.budget and route["buy"] > 0:
             want = min(want, self.budget // route["buy"])
         if want <= 0:

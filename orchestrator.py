@@ -17,7 +17,7 @@ import store
 import world as world_mod
 from api import ApiError, Client
 from contracts import ContractManager
-from fleet import find_offer, plan_expansion
+from fleet import find_offer, pick_expansion_type, plan_expansion
 from routing import system_of
 from tui.bots import MinerBot, ScoutBot, TraderBot
 
@@ -164,13 +164,24 @@ class Orchestrator:
                 self.bots.pop(sym, None)
                 self._threads.pop(sym, None)
 
+    def _resolve_expand_type(self, system: str) -> str | None:
+        """The concrete ship type to buy this tick. ``AUTO`` picks the type that
+        best relieves the fleet's current bottleneck from what's for sale."""
+        if self.expand_ship_type != "AUTO":
+            return self.expand_ship_type
+        types = self.world.ship_types(system) if self.world else []
+        return pick_expansion_type(self.roster(), types)
+
     def _maybe_expand(self, ship_count: int) -> None:
         if not self.expand_ship_type:
             return
         try:
-            credits = self.c.my_agent().get("credits", 0)
             system = system_of(config.HQ)
-            wp, price = find_offer(self.c, system, self.expand_ship_type)
+            ship_type = self._resolve_expand_type(system)
+            if not ship_type:
+                return
+            credits = self.c.my_agent().get("credits", 0)
+            wp, price = find_offer(self.c, system, ship_type)
             if not wp:
                 return
             n = plan_expansion(
@@ -179,9 +190,9 @@ class Orchestrator:
             )
             if n <= 0:
                 return
-            data = self.c.purchase_ship(self.expand_ship_type, wp)
+            data = self.c.purchase_ship(ship_type, wp)
             new = data.get("ship", {}).get("symbol", "?")
-            self.on_log(f"reinvested → bought {new} ({self.expand_ship_type})")
+            self.on_log(f"reinvested → bought {new} ({ship_type})")
         except ApiError as e:
             self.on_log(f"expand failed: {e.message}")
 
