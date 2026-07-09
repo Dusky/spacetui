@@ -435,8 +435,10 @@ function vAutomation() {
       <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>
       <label class="muted"><input id="o-contracts" type="checkbox"> auto-contracts</label>`;
     bar.appendChild(cfg);
-    // populate the reinvest dropdown from ship types your shipyards actually sell
-    if (shipTypes) fillShipTypes($("#o-expand"));
+    // populate the reinvest dropdown from ship types your shipyards actually sell.
+    // query within cfg (not the document) — bar isn't appended to #main yet.
+    const sel = cfg.querySelector("#o-expand");
+    if (shipTypes) fillShipTypes(sel);
     else getJSON("/api/shiptypes").then(t => { shipTypes = t; const s = $("#o-expand"); if (s) fillShipTypes(s); });
     const row = el("div", "row");
     const btn = el("button", "btn primary", "🚀 Orchestrate Fleet");
@@ -542,8 +544,10 @@ function refreshLog() {
 
 function render() {
   if (!state) return;
-  ({ overview: vOverview, fleet: vFleet, contracts: vContracts, markets: vMarkets,
-     map: vMap, automation: vAutomation, analytics: vAnalytics }[view] || vOverview)();
+  const fn = { overview: vOverview, fleet: vFleet, contracts: vContracts, markets: vMarkets,
+    map: vMap, automation: vAutomation, analytics: vAnalytics }[view] || vOverview;
+  // never let a view error blank the page on a live re-render
+  try { fn(); } catch (e) { console.error("view render failed:", e); }
 }
 
 /* ---------- setup screen (first run) ---------- */
