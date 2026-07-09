@@ -6,7 +6,6 @@ import threading
 import time
 
 import claims
-import config
 import store
 import world as world_mod
 from api import ApiError, Client
@@ -88,6 +87,12 @@ class BaseBot:
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
+    @staticmethod
+    def _is_transient_nav_error(e: ApiError) -> bool:
+        """A ship-in-transit conflict (e.g. a stale action fired mid-flight) —
+        transient, so re-sync and retry rather than halting the bot."""
+        return getattr(e, "code", None) == 4214 or "in-transit" in getattr(e, "message", "").lower()
+
     def _log(self, msg: str) -> None:
         self.on_log(f"{self.ship}  {msg}")
 
@@ -136,6 +141,9 @@ class BaseBot:
             if e.code == 4203 or "fuel" in e.message.lower():
                 self.c.set_flight_mode(self.ship, "DRIFT")
                 self.c.navigate(self.ship, waypoint)
+            elif self._is_transient_nav_error(e):
+                # already in transit (e.g. a racing action) — just ride it out
+                pass
             else:
                 raise
         return self._await_arrival()
@@ -284,11 +292,23 @@ class MinerBot(BaseBot):
         w = self.c.waypoint(system, wp)
         return any(t["symbol"] == trait for t in w.get("traits", []))
 
-    def _next_rock(self, system: str, avoid: set[str]) -> dict | None:
-        for w in self._wps(system, trait="MINERAL_DEPOSITS"):
-            if w["symbol"] not in avoid:
-                return w
-        return None
+    def _next_rock(self, system: str, avoid: set[str], here: str | None = None) -> dict | None:
+        """Nearest un-avoided asteroid field to ``here`` (by x/y). Falls back to
+        the first candidate when the origin's coordinates are unknown."""
+        rocks = [w for w in self._wps(system, trait="MINERAL_DEPOSITS")
+                 if w["symbol"] not in avoid]
+        if not rocks:
+            return None
+        origin = None
+        if here:
+            for w in self._wps(system):
+                if w["symbol"] == here:
+                    origin = (w.get("x", 0), w.get("y", 0))
+                    break
+        if origin is None:
+            return rocks[0]
+        return min(rocks, key=lambda w: (w.get("x", 0) - origin[0]) ** 2
+                   + (w.get("y", 0) - origin[1]) ** 2)
 
     def _pick_survey(self, desired: str | None) -> dict | None:
         if not self.surveys:
@@ -304,38 +324,6 @@ class MinerBot(BaseBot):
                     if sc > best_score:
                         best, best_score = sv, sc
         return best or self.surveys[0]
-
-    def _ensure_fuel(self, s: dict) -> bool:
-        nav = s.get("nav", {})
-        fuel = s.get("fuel", {})
-        cap = fuel.get("capacity", 0)
-        cur = fuel.get("current", 0)
-        if cap == 0 or cur / max(cap, 1) >= 0.5:
-            return False
-        target = config.HQ
-        self._log(f"fuel low {cur}/{cap} → refuel at {target}")
-        self._status(mode="refuel", last=f"→ {target}")
-        if nav.get("waypointSymbol") != target:
-            if nav.get("status") == "DOCKED":
-                self.c.orbit(self.ship)
-            try:
-                self.c.navigate(self.ship, target)
-            except ApiError as e:
-                if e.code == 4203 or "fuel" in e.message.lower():
-                    self.c.set_flight_mode(self.ship, "DRIFT")
-                    self.c.navigate(self.ship, target)
-                else:
-                    raise
-            return True
-        if nav.get("status") != "DOCKED":
-            self.c.dock(self.ship)
-        try:
-            self.c.refuel(self.ship)
-            self.c.set_flight_mode(self.ship, "CRUISE")
-            self._log("refueled")
-        except ApiError as e:
-            self._log(f"refuel failed: {e.message}")
-        return True
 
     def _sell_off(self, s: dict, contract: dict | None) -> None:
         nav = s.get("nav", {})
@@ -389,7 +377,8 @@ class MinerBot(BaseBot):
             self._status(mode="sell", last=f"→ {market}")
             s = self._goto(s, market)
         self.c.dock(self.ship)
-        self._maybe_refuel()
+        # top right up here so the next mining run can CRUISE out on a full tank
+        self._maybe_refuel(threshold=0.9)
         for item in inv:
             try:
                 data = self.c.sell(self.ship, item["symbol"], item["units"])
@@ -424,8 +413,10 @@ class MinerBot(BaseBot):
                     if cid:
                         self.contract_id = cid
 
-                if self._ensure_fuel(s):
-                    continue
+                # top up opportunistically if we happen to be docked low — but
+                # never divert away from a rock to refuel: mining costs no fuel,
+                # only navigation does, and the sell trip refuels at the market.
+                self._maybe_refuel()
 
                 cargo = s.get("cargo", {})
                 capacity = cargo.get("capacity", 0)
@@ -454,16 +445,14 @@ class MinerBot(BaseBot):
                     continue
 
                 if not self._has_trait(system, here, "MINERAL_DEPOSITS"):
-                    rock = self._next_rock(system, tried)
+                    rock = self._next_rock(system, tried, here)
                     if not rock:
                         self._log("no mineral deposits in system")
                         self._sleep(15)
                         continue
                     self._log(f"→ {rock['symbol']} to mine")
-                    self._status(mode="transit", last=f"→ {rock['symbol']}")
-                    if nav.get("status") == "DOCKED":
-                        self.c.orbit(self.ship)
-                    self.c.navigate(self.ship, rock["symbol"])
+                    # _goto orbits-if-docked, DRIFTs if fuel-short, and awaits
+                    self._goto(s, rock["symbol"])
                     continue
 
                 if nav.get("status") != "IN_ORBIT":
@@ -492,12 +481,11 @@ class MinerBot(BaseBot):
                     )
                     if not has:
                         tried.add(here)
-                        rock = self._next_rock(system, tried)
+                        rock = self._next_rock(system, tried, here)
                         if rock:
                             self._log(f"no {desired} at {here} → {rock['symbol']}")
-                            self._status(mode="transit", last=f"→ {rock['symbol']}")
-                            self.c.navigate(self.ship, rock["symbol"])
                             self.surveys = []
+                            self._goto(s, rock["symbol"])
                             continue
                         self._log(f"no {desired} found; mining raw")
                         self.surveys = []
