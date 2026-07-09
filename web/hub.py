@@ -16,6 +16,7 @@ from collections import deque
 
 import config
 import store
+import world as world_mod
 from api import ApiError, Client
 from orchestrator import Orchestrator, classify_ship
 from tui.bots import MinerBot, ScoutBot, TraderBot
@@ -27,6 +28,8 @@ class Hub:
     def __init__(self, client: Client):
         self.c = client
         self.hq = config.HQ
+        # one shared world model for the poller, the bots and the orchestrator
+        self.world = world_mod.bind(client)
         self._lock = threading.Lock()
         self._agent: dict = {}
         self._ships: list[dict] = []
@@ -40,55 +43,17 @@ class Hub:
         self._poller: threading.Thread | None = None
         self._stop = threading.Event()
         self._subs: set = set()  # SSE subscriber queues
-        self._wp_cache: dict[str, tuple[list, float]] = {}  # system -> (waypoints, ts)
-        self._yard_cache: dict[str, tuple[list, float]] = {}  # system -> (shiptypes, ts)
 
     # -- ship types for sale (feeds the reinvest dropdown) -----------------
-    def ship_types(self, system: str | None = None, max_age: float = 600.0) -> list[dict]:
+    def ship_types(self, system: str | None = None) -> list[dict]:
         system = system or "-".join((self.hq or "").split("-")[:2])
         if not system:
             return []
-        hit = self._yard_cache.get(system)
-        if hit and time.time() - hit[1] < max_age:
-            return hit[0]
-        found: dict[str, int | None] = {}
-        try:
-            yards = self.c.waypoints(system, filters={"traits": "SHIPYARD"})
-        except Exception:
-            yards = []
-        for wp in yards:
-            try:
-                yard = self.c.shipyard(system, wp["symbol"])
-            except Exception:
-                continue
-            for offer in yard.get("ships", []):  # live listings w/ price
-                t = offer.get("type")
-                if t:
-                    found[t] = offer.get("purchasePrice")
-            for st in yard.get("shipTypes", []):  # types only (no ship present)
-                t = st.get("type") if isinstance(st, dict) else st
-                if t and t not in found:
-                    found[t] = None
-        out = [{"type": t, "price": found[t]} for t in sorted(found)]
-        self._yard_cache[system] = (out, time.time())
-        return out
+        return self.world.ship_types(system)
 
-    # -- system waypoints (cached; the map view reads these) ---------------
-    def system_waypoints(self, system: str, max_age: float = 600.0) -> list[dict]:
-        hit = self._wp_cache.get(system)
-        if hit and time.time() - hit[1] < max_age:
-            return hit[0]
-        wps = []
-        for w in self.c.waypoints(system):
-            wps.append({
-                "symbol": w.get("symbol"),
-                "type": w.get("type"),
-                "x": w.get("x", 0),
-                "y": w.get("y", 0),
-                "traits": [t.get("symbol") for t in w.get("traits", [])],
-            })
-        self._wp_cache[system] = (wps, time.time())
-        return wps
+    # -- system waypoints (the map view reads these) -----------------------
+    def system_waypoints(self, system: str) -> list[dict]:
+        return self.world.get_waypoints(system)
 
     # -- pub/sub (Server-Sent Events) --------------------------------------
     def subscribe(self) -> "queue.Queue":
@@ -202,10 +167,14 @@ class Hub:
         if ship in self.bots:
             return
         cls = _BOT_CLASSES.get(kind, TraderBot)
-        bot = cls(self.c, ship, on_log=lambda m: self.log(m))
+        bot = cls(self.c, ship, world=self.world, on_log=lambda m: self.log(m))
         bot.kind = kind
         self.bots[ship] = bot
         threading.Thread(target=bot.run, daemon=True, name=f"web-bot-{ship}").start()
+        try:
+            store.record_ship_assignment(ship, kind)
+        except Exception:  # noqa - bookkeeping must never block a start
+            pass
         self.log(f"{ship} {kind} bot started")
         self._push_state()
 
@@ -227,6 +196,7 @@ class Hub:
             max_ships=int(opts["max_ships"]) if opts.get("max_ships") else None,
             cross_system=bool(opts.get("cross_system")),
             auto_contracts=bool(opts.get("auto_contracts")),
+            world=self.world,
             on_log=lambda m: self.log(m),
         )
         self.orchestrator.start()

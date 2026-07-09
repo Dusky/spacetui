@@ -81,6 +81,28 @@ CREATE TABLE IF NOT EXISTS trades (
     total          INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades (observed_at);
+CREATE INDEX IF NOT EXISTS idx_trades_ship ON trades (ship, observed_at);
+
+-- the shared world model persists here so a restarted process starts warm
+CREATE TABLE IF NOT EXISTS waypoints (
+    symbol      TEXT PRIMARY KEY,
+    system      TEXT NOT NULL,
+    type        TEXT,
+    x           INTEGER,
+    y           INTEGER,
+    traits      TEXT,            -- comma-joined trait symbols
+    observed_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_waypoints_system ON waypoints (system);
+
+-- which role a ship was put to work in, and when (feeds the ROI view)
+CREATE TABLE IF NOT EXISTS ship_assignments (
+    observed_at REAL NOT NULL,
+    ship        TEXT NOT NULL,
+    role        TEXT,
+    route       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_assign_ship ON ship_assignments (ship, observed_at);
 """
 
 
@@ -348,6 +370,83 @@ def jump_edges(conn: sqlite3.Connection | None = None) -> list[dict]:
     with _lock:
         cur = c.execute("SELECT * FROM jump_edges")
         return [dict(r) for r in cur.fetchall()]
+
+
+# -- world model persistence -----------------------------------------------
+def record_waypoints(
+    system: str, waypoints: list[dict], conn: sqlite3.Connection | None = None
+) -> int:
+    """Upsert normalized waypoint dicts ``{symbol,type,x,y,traits:[...]}`` for a
+    system so the world model can rehydrate them across process restarts."""
+    if not waypoints:
+        return 0
+    now = time.time()
+    rows = [
+        (w.get("symbol", ""), system, w.get("type"),
+         w.get("x", 0), w.get("y", 0),
+         ",".join(w.get("traits", []) or []), now)
+        for w in waypoints if w.get("symbol")
+    ]
+    if not rows:
+        return 0
+    c = conn or connect()
+    with _lock:
+        c.executemany(
+            """INSERT INTO waypoints (symbol, system, type, x, y, traits, observed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(symbol) DO UPDATE SET
+                   system=excluded.system, type=excluded.type,
+                   x=excluded.x, y=excluded.y, traits=excluded.traits,
+                   observed_at=excluded.observed_at""",
+            rows,
+        )
+        c.commit()
+    return len(rows)
+
+
+def waypoints_of(
+    system: str, max_age_s: float | None = None, conn: sqlite3.Connection | None = None
+) -> list[dict]:
+    """Return normalized waypoint dicts for a system (traits split back to a
+    list), optionally only those seen within ``max_age_s``."""
+    c = conn or connect()
+    sql = "SELECT symbol, type, x, y, traits FROM waypoints WHERE system = ?"
+    params: list = [system]
+    if max_age_s is not None:
+        sql += " AND observed_at >= ?"
+        params.append(time.time() - max_age_s)
+    with _lock:
+        rows = c.execute(sql, params).fetchall()
+    return [
+        {"symbol": r["symbol"], "type": r["type"], "x": r["x"], "y": r["y"],
+         "traits": [t for t in (r["traits"] or "").split(",") if t]}
+        for r in rows
+    ]
+
+
+def record_ship_assignment(
+    ship: str, role: str, route: str = "", conn: sqlite3.Connection | None = None
+) -> None:
+    """Append a ship→role assignment so per-ship history survives a restart."""
+    c = conn or connect()
+    with _lock:
+        c.execute(
+            "INSERT INTO ship_assignments (observed_at, ship, role, route) VALUES (?, ?, ?, ?)",
+            (time.time(), ship, role, route),
+        )
+        c.commit()
+
+
+def ship_assignments(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Latest role per ship (most recent assignment wins; rowid breaks ties)."""
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            """SELECT ship, role, route, observed_at FROM ship_assignments
+               WHERE rowid IN (SELECT MAX(rowid) FROM ship_assignments GROUP BY ship)
+               ORDER BY ship"""
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def latest_prices(

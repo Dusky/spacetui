@@ -46,15 +46,21 @@ class FakeClient:
 
     def waypoints(self, system, filters=None):
         self.calls.append(("waypoints", system))
-        if filters and filters.get("traits") == "SHIPYARD":
-            return [{"symbol": "X1-AF2-YARD", "type": "ORBITAL_STATION", "x": 0, "y": 0,
-                     "traits": [{"symbol": "SHIPYARD"}]}]
-        return [
+        allwp = [
             {"symbol": "X1-AF2-A1", "type": "PLANET", "x": 10, "y": 5,
              "traits": [{"symbol": "MARKETPLACE"}]},
             {"symbol": "X1-AF2-B2", "type": "ASTEROID_FIELD", "x": -8, "y": 12,
              "traits": [{"symbol": "MINERAL_DEPOSITS"}]},
+            {"symbol": "X1-AF2-YARD", "type": "ORBITAL_STATION", "x": 0, "y": 0,
+             "traits": [{"symbol": "SHIPYARD"}]},
         ]
+        if filters and filters.get("traits"):
+            want = filters["traits"]
+            return [w for w in allwp
+                    if any(t["symbol"] == want for t in w["traits"])]
+        if filters and filters.get("type"):
+            return [w for w in allwp if w["type"] == filters["type"]]
+        return allwp
 
     def shipyard(self, system, wp):
         return {"symbol": wp, "ships": [
@@ -223,7 +229,7 @@ def test_system_map_endpoint_and_cache(app):
     r = c.get("/api/system/X1-AF2").get_json()
     assert r["system"] == "X1-AF2"
     syms = {w["symbol"] for w in r["waypoints"]}
-    assert syms == {"X1-AF2-A1", "X1-AF2-B2"}
+    assert syms == {"X1-AF2-A1", "X1-AF2-B2", "X1-AF2-YARD"}
     a1 = next(w for w in r["waypoints"] if w["symbol"] == "X1-AF2-A1")
     assert a1["x"] == 10 and "MARKETPLACE" in a1["traits"]
     n = sum(1 for x in app.hub.c.calls if x[0] == "waypoints")

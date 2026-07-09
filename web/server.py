@@ -196,10 +196,11 @@ def create_app(
             return jsonify({"error": "not configured"}), 409
         system = "-".join(waypoint.split("-")[:2])
         try:
-            m = hub().c.market(system, waypoint)
+            m = hub().world.get_market(system, waypoint)
         except Exception as e:  # noqa
             return jsonify({"error": str(e)}), 502
-        store.record_market(m)
+        if m is None:
+            return jsonify({"error": "no market at waypoint"}), 404
         return jsonify(m)
 
     # -- control API -------------------------------------------------------

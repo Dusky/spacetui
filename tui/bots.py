@@ -8,6 +8,7 @@ import time
 import claims
 import config
 import store
+import world as world_mod
 from api import ApiError, Client
 from arbitrage import price_ceiling, price_floor, sustainable_units
 from routing import build_graph, shortest_path, system_of
@@ -40,11 +41,14 @@ class BaseBot:
         client: Client,
         ship: str,
         *,
+        world=None,
         on_log=None,
         on_status=None,
     ):
         self.c = client
         self.ship = ship
+        # shared world model (cached discovery); fall back to the module default
+        self.world = world if world is not None else world_mod.WORLD
         self.on_log = on_log or (lambda m: None)
         self.on_status = on_status or (lambda **k: None)
         self._cancel = threading.Event()
@@ -53,6 +57,28 @@ class BaseBot:
         self.max_hops = 2
         self.cross_system = False
         self._gated: set[str] = set()
+
+    # -- discovery via the shared world model (falls back to direct calls) --
+    def _wps(self, system: str, *, trait: str | None = None,
+             type: str | None = None) -> list[dict]:
+        if self.world is not None:
+            return self.world.find_waypoints(system, trait=trait, type=type)
+        filters: dict = {}
+        if trait:
+            filters["traits"] = trait
+        if type:
+            filters["type"] = type
+        return self.c.waypoints(system, filters=filters or None)
+
+    def _market(self, system: str, waypoint: str, fresh: bool = False) -> dict | None:
+        if self.world is not None:
+            return self.world.get_market(system, waypoint, max_age=0 if fresh else None)
+        try:
+            m = self.c.market(system, waypoint)
+        except ApiError:
+            return None
+        store.record_market(m)
+        return m
 
     def stop(self) -> None:
         self._cancel.set()
@@ -129,18 +155,17 @@ class BaseBot:
             self._log(f"refuel skipped: {e.message}")
 
     # -- market & jump-gate exploration (shared by traders and scouts) -----
-    def _record_here(self, system: str, waypoint: str) -> dict | None:
-        try:
-            m = self.c.market(system, waypoint)
-        except ApiError:
+    def _record_here(self, system: str, waypoint: str, fresh: bool = False) -> dict | None:
+        m = self._market(system, waypoint, fresh=fresh)
+        if m is None:
             return None
-        n = store.record_market(m)
-        if n:
-            self._log(f"scanned {waypoint} ({n} goods)")
+        goods = m.get("tradeGoods") or []
+        if goods:
+            self._log(f"scanned {waypoint} ({len(goods)} goods)")
         return m
 
     def _first_market(self, system: str) -> str | None:
-        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+        for w in self._wps(system, trait="MARKETPLACE"):
             return w["symbol"]
         return None
 
@@ -149,7 +174,7 @@ class BaseBot:
             o["waypoint"]
             for o in store.latest_prices(system=system, max_age_s=self.max_age_s)
         }
-        for w in self.c.waypoints(system, filters={"traits": "MARKETPLACE"}):
+        for w in self._wps(system, trait="MARKETPLACE"):
             if w["symbol"] != here and w["symbol"] not in fresh:
                 return w["symbol"]
         return None
@@ -160,7 +185,7 @@ class BaseBot:
             return
         self._gated.add(system)
         try:
-            gates = self.c.waypoints(system, filters={"type": "JUMP_GATE"})
+            gates = self._wps(system, type="JUMP_GATE")
         except ApiError:
             return
         if not gates:
@@ -237,10 +262,11 @@ class MinerBot(BaseBot):
         contract: str | None = None,
         sell: bool = True,
         get_contract=None,
+        world=None,
         on_log=None,
         on_status=None,
     ):
-        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        super().__init__(client, ship, world=world, on_log=on_log, on_status=on_status)
         self.contract_id = contract
         self.sell = sell
         # optional callable returning the currently-active contract id to adopt
@@ -249,11 +275,16 @@ class MinerBot(BaseBot):
 
     # -- internals ---------------------------------------------------------
     def _has_trait(self, system: str, wp: str, trait: str) -> bool:
+        if self.world is not None:
+            for w in self.world.get_waypoints(system):
+                if w["symbol"] == wp:
+                    return trait in (w.get("traits") or [])
+            return False
         w = self.c.waypoint(system, wp)
         return any(t["symbol"] == trait for t in w.get("traits", []))
 
     def _next_rock(self, system: str, avoid: set[str]) -> dict | None:
-        for w in self.c.waypoints(system, filters={"traits": "MINERAL_DEPOSITS"}):
+        for w in self._wps(system, trait="MINERAL_DEPOSITS"):
             if w["symbol"] not in avoid:
                 return w
         return None
@@ -349,10 +380,7 @@ class MinerBot(BaseBot):
         inv = s.get("cargo", {}).get("inventory", [])
         if not inv:
             return
-        market = None
-        for w in self.c.waypoints(nav["systemSymbol"], filters={"traits": "MARKETPLACE"}):
-            market = w["symbol"]
-            break
+        market = self._first_market(nav["systemSymbol"])
         if not market:
             self._log("no marketplace to sell at")
             return
@@ -375,10 +403,7 @@ class MinerBot(BaseBot):
             except ApiError as e:
                 self._log(f"can't sell {item['symbol']}: {e.message}")
         # record the fresh prices we just saw here
-        try:
-            store.record_market(self.c.market(nav["systemSymbol"], market))
-        except ApiError:
-            pass
+        self._record_here(nav["systemSymbol"], market, fresh=True)
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -533,10 +558,11 @@ class TraderBot(BaseBot):
         cross_system: bool = False,
         max_hops: int = 2,
         hop_penalty: int = 0,
+        world=None,
         on_log=None,
         on_status=None,
     ):
-        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        super().__init__(client, ship, world=world, on_log=on_log, on_status=on_status)
         self.min_profit = min_profit
         self.budget = budget
         self.max_age_s = max_age_s
@@ -637,7 +663,7 @@ class TraderBot(BaseBot):
         self._status(mode="buy", last=f"buy {good}")
         ceiling = price_ceiling(route["sell"], margin)
         bought, spent = self._buy(good, want, per_tx, waypoint=route["buy_wp"], ceiling=ceiling)
-        self._record_here(buy_system, route["buy_wp"])
+        self._record_here(buy_system, route["buy_wp"], fresh=True)
         if bought <= 0:
             return
         # never sell below what we actually paid, plus our margin
@@ -654,7 +680,7 @@ class TraderBot(BaseBot):
         self._maybe_refuel()
         self._status(mode="sell", last=f"sell {good}")
         sold, revenue = self._sell(good, per_tx, waypoint=route["sell_wp"], floor=floor)
-        self._record_here(sell_system, route["sell_wp"])
+        self._record_here(sell_system, route["sell_wp"], fresh=True)
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
 
     def _offload(self, s: dict, system: str) -> None:
@@ -764,10 +790,11 @@ class ScoutBot(BaseBot):
         max_hops: int = 1,
         max_age_s: float = 600.0,
         dwell: int = 45,
+        world=None,
         on_log=None,
         on_status=None,
     ):
-        super().__init__(client, ship, on_log=on_log, on_status=on_status)
+        super().__init__(client, ship, world=world, on_log=on_log, on_status=on_status)
         self.cross_system = cross_system
         self.max_hops = max_hops
         self.max_age_s = max_age_s

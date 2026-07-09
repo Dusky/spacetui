@@ -13,6 +13,8 @@ import threading
 import time
 
 import config
+import store
+import world as world_mod
 from api import ApiError, Client
 from contracts import ContractManager
 from fleet import find_offer, plan_expansion
@@ -48,6 +50,7 @@ class Orchestrator:
         cross_system: bool = False,
         auto_contracts: bool = False,
         tick: int = 20,
+        world=None,
         on_log=None,
         on_deploy=None,
         spawn=None,
@@ -59,6 +62,8 @@ class Orchestrator:
         self.cross_system = cross_system
         self.auto_contracts = auto_contracts
         self.tick = tick
+        # shared world model so every bot this controller deploys hits one cache
+        self.world = world if world is not None else world_mod.WORLD
         self._contract_mgr: ContractManager | None = None
         self.on_log = on_log or (lambda m: None)
         self.on_deploy = on_deploy or (lambda sym, role: None)
@@ -99,13 +104,15 @@ class Orchestrator:
 
         if role == "miner":
             bot = MinerBot(
-                self.c, ship_symbol, on_log=log,
+                self.c, ship_symbol, world=self.world, on_log=log,
                 get_contract=lambda: self._contract_mgr.active_contract_id if self._contract_mgr else None,
             )
         elif role == "trader":
-            bot = TraderBot(self.c, ship_symbol, cross_system=self.cross_system, on_log=log)
+            bot = TraderBot(self.c, ship_symbol, world=self.world,
+                            cross_system=self.cross_system, on_log=log)
         else:
-            bot = ScoutBot(self.c, ship_symbol, cross_system=self.cross_system, on_log=log)
+            bot = ScoutBot(self.c, ship_symbol, world=self.world,
+                           cross_system=self.cross_system, on_log=log)
         bot._role = role
         return bot
 
@@ -142,6 +149,10 @@ class Orchestrator:
         bot = self._make_bot(sym, role)
         self.bots[sym] = bot
         self._spawn(bot)
+        try:
+            store.record_ship_assignment(sym, role)
+        except Exception:  # noqa - bookkeeping must never block a deploy
+            pass
         self.on_log(f"deployed {role} → {sym}")
         self.on_deploy(sym, role)
 
