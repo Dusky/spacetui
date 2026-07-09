@@ -217,6 +217,11 @@ class Hub:
     def start_bot(self, ship: str, kind: str) -> None:
         if ship in self.bots:
             return
+        # don't let a manual bot fight the orchestrator for the same ship —
+        # two controllers race and one issues a nav mid-flight (a [4214] crash)
+        if self.orchestrator and self.orchestrator.running and ship in self.orchestrator.roster():
+            self.log(f"{ship} is orchestrator-controlled; stop the orchestrator to drive it manually")
+            return
         cls = _BOT_CLASSES.get(kind, TraderBot)
         bot = cls(self.c, ship, world=self.world, on_log=lambda m: self.log(m))
         bot.kind = kind

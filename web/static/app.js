@@ -541,8 +541,12 @@ function vAutomation() {
     card.innerHTML = `<div class="top"><span class="name">${sym}</span>` +
       (role ? `<span class="pill run">${role}</span>` : bot ? `<span class="pill run">${bot.role}</span>` : `<span class="pill">idle</span>`) + `</div>`;
     const r = el("div", "row"); r.style.marginTop = "8px";
-    if (bot) { const b = el("button", "btn danger", "Stop"); b.onclick = async () => { await postJSON("/api/bot", { ship: sym, kind: "stop" }); poll(); }; r.appendChild(b); }
-    else for (const [k, lbl, cls] of [["mine", "Mine", "primary"], ["trade", "Trade", "gold"], ["scout", "Scout", ""]]) {
+    if (role) {
+      // the orchestrator owns this ship — don't offer a competing manual bot
+      r.appendChild(el("span", "dim", "orchestrator-controlled"));
+    } else if (bot) {
+      const b = el("button", "btn danger", "Stop"); b.onclick = async () => { await postJSON("/api/bot", { ship: sym, kind: "stop" }); poll(); }; r.appendChild(b);
+    } else for (const [k, lbl, cls] of [["mine", "Mine", "primary"], ["trade", "Trade", "gold"], ["scout", "Scout", ""]]) {
       const b = el("button", "btn " + cls, lbl); b.onclick = async () => { await postJSON("/api/bot", { ship: sym, kind: k }); poll(); }; r.appendChild(b);
     }
     card.appendChild(r); grid.appendChild(card);

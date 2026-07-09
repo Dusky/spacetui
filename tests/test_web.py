@@ -308,6 +308,31 @@ def test_alert_event_reaches_subscriber(app):
     assert any(e["event"] == "alert" and "stranded" in e["data"]["msg"] for e in seen)
 
 
+def test_start_bot_refuses_orchestrator_controlled_ship(app):
+    hub = app.hub
+
+    class OrchStub:
+        running = True
+        expand_ship_type = None
+        credit_buffer = 100000
+        max_ships = None
+        cross_system = False
+        auto_contracts = False
+        goal = "grow"
+        construct_waypoint = None
+
+        def roster(self):
+            return {"MDOE-1": "miner"}
+
+    hub.orchestrator = OrchStub()
+    hub.start_bot("MDOE-1", "mine")            # orchestrator already owns it
+    assert "MDOE-1" not in hub.bots            # refused, no competing bot
+    hub.start_bot("MDOE-2", "trade")           # a free ship still starts
+    assert "MDOE-2" in hub.bots
+    hub.stop_bot("MDOE-2")
+    hub.orchestrator = None
+
+
 def test_token_auth_blocks_and_allows():
     app = create_app(FakeClient(), start_poller=False, token="sekret")
     app.hub.refresh()
