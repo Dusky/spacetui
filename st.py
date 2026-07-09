@@ -822,6 +822,8 @@ def cmd_orchestrate(args, c: Client) -> None:
         max_ships=args.max_ships,
         cross_system=args.cross_system,
         auto_contracts=args.auto_contracts,
+        goal=args.goal,
+        construct_waypoint=args.construct,
         on_log=lambda m: print(m),
     )
     print("Fleet orchestrator engaged. Ctrl+C to stop.")
@@ -832,6 +834,59 @@ def cmd_orchestrate(args, c: Client) -> None:
     except KeyboardInterrupt:
         orch.stop()
         print("\nOrchestrator stopped.")
+
+
+def cmd_construct(args, c: Client) -> None:
+    from tui.bots import ConstructionBot
+
+    bot = ConstructionBot(c, args.ship, target=args.waypoint, on_log=lambda m: print(m))
+    print(f"Construction supplier engaged: {args.ship} → {args.waypoint}. Ctrl+C to stop.")
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        bot.stop()
+        print("\nConstruction supplier stopped.")
+
+
+def cmd_metrics(args, c: Client) -> None:
+    import metrics
+    from ratelimit import LIMITER
+
+    agent = c.my_agent()
+    store.record_credits(agent.get("credits", 0), agent.get("shipCount", 0))
+    pph = metrics.profit_per_hour(store.credit_series(limit=500))
+    roi = metrics.roi_per_ship(store.ship_pnl(), store.ship_assignments())
+    api = LIMITER.status()
+    print(f"Net worth    {_credits(agent.get('credits', 0))}")
+    print(f"Credits/hr   {pph:+,.0f}")
+    print(f"Fleet        {agent.get('shipCount', 0)} ships")
+    print(f"API budget   {api['tokens']}/{api['capacity']} tokens"
+          + (f", backing off {api['blocked_for']}s" if api["blocked_for"] else ""))
+    if roi:
+        print("\nROI per ship:")
+        for r in roi:
+            print(f"  {r['ship']:<14} {(r.get('role') or '-'):<8} "
+                  f"net {r['net']:+,}c  (spent {r['spent']:,} · earned {r['earned']:,})")
+    by_role = metrics.role_contribution(roi)
+    if by_role:
+        print("\nBy role: " + " · ".join(f"{k} {v:+,}c" for k, v in by_role.items()))
+
+
+def cmd_alerts(args, c: Client) -> None:
+    import metrics
+    from ratelimit import LIMITER
+
+    ships = c.ships()
+    contracts = c.contracts()
+    pph = metrics.profit_per_hour(store.credit_series(limit=500))
+    al = metrics.derive_alerts(
+        ships, set(), pph, contracts, orch_running=False,
+        api_blocked_for=LIMITER.status()["blocked_for"])
+    if not al:
+        print("All clear — no alerts.")
+        return
+    for a in al:
+        print(f"  {'!' if a['level'] == 'warn' else '·'} {a['msg']}")
 
 
 # -- fleet growth & refit ---------------------------------------------------
@@ -1081,7 +1136,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="let traders/scouts range across the jump-gate network")
     sp.add_argument("--auto-contracts", action="store_true", dest="auto_contracts",
                     help="negotiate/accept procurement contracts and have miners fulfill them")
+    sp.add_argument("--goal", default="grow",
+                    choices=["grow", "contracts", "construct", "explore"],
+                    help="long-horizon objective the fleet steers toward (default grow)")
+    sp.add_argument("--construct", metavar="WAYPOINT",
+                    help="construction-site waypoint for --goal construct")
     sp.set_defaults(func=cmd_orchestrate)
+
+    sp = sub.add_parser("construct", help="supply a construction site (e.g. the jump gate) with one ship")
+    sp.add_argument("waypoint", help="the construction-site waypoint")
+    sp.add_argument("ship", help="a hauler to ferry materials")
+    sp.set_defaults(func=cmd_construct)
+
+    sp = sub.add_parser("metrics", help="mission KPIs: credits/hour, ROI per ship, API budget")
+    sp.set_defaults(func=cmd_metrics)
+
+    sp = sub.add_parser("alerts", help="derived warnings: stranded/idle ships, deadlines, rate limits")
+    sp.set_defaults(func=cmd_alerts)
 
     sp = sub.add_parser("autocontract", help="keep procurement contracts flowing (negotiate/accept)")
     sp.add_argument("ship", help="a ship able to negotiate (docked at a faction waypoint, e.g. HQ)")
@@ -1155,9 +1226,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     import onboarding
+    import world
 
     token = args.token or onboarding.ensure_onboarded()
     c = Client(token=token)
+    world.bind(c)  # bots/orchestrator share one cached world model
     try:
         args.func(args, c)
     except ApiError as e:
