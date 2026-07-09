@@ -19,7 +19,9 @@ from api import ApiError, Client
 from contracts import ContractManager
 from fleet import find_offer, pick_expansion_type, plan_expansion
 from routing import system_of
-from tui.bots import MinerBot, ScoutBot, TraderBot
+from tui.bots import ConstructionBot, MinerBot, ScoutBot, TraderBot
+
+GOALS = ("grow", "contracts", "construct", "explore")
 
 
 def classify_ship(ship: dict) -> str:
@@ -49,6 +51,8 @@ class Orchestrator:
         max_ships: int | None = None,
         cross_system: bool = False,
         auto_contracts: bool = False,
+        goal: str = "grow",
+        construct_waypoint: str | None = None,
         tick: int = 20,
         world=None,
         on_log=None,
@@ -61,6 +65,9 @@ class Orchestrator:
         self.max_ships = max_ships
         self.cross_system = cross_system
         self.auto_contracts = auto_contracts
+        # long-horizon objective the controller steers toward
+        self.goal = goal if goal in GOALS else "grow"
+        self.construct_waypoint = construct_waypoint
         self.tick = tick
         # shared world model so every bot this controller deploys hits one cache
         self.world = world if world is not None else world_mod.WORLD
@@ -102,7 +109,10 @@ class Orchestrator:
         def log(msg, r=role):
             self.on_log(f"[{r}] {msg}")
 
-        if role == "miner":
+        if role == "construct":
+            bot = ConstructionBot(self.c, ship_symbol, world=self.world,
+                                  target=self.construct_waypoint, on_log=log)
+        elif role == "miner":
             bot = MinerBot(
                 self.c, ship_symbol, world=self.world, on_log=log,
                 get_contract=lambda: self._contract_mgr.active_contract_id if self._contract_mgr else None,
@@ -112,9 +122,20 @@ class Orchestrator:
                             cross_system=self.cross_system, on_log=log)
         else:
             bot = ScoutBot(self.c, ship_symbol, world=self.world,
-                           cross_system=self.cross_system, on_log=log)
+                           cross_system=self.cross_system,
+                           explore=(self.goal == "explore"), on_log=log)
         bot._role = role
         return bot
+
+    def _role_for(self, ship: dict) -> str:
+        """The role to deploy for a ship, given the active goal. The construct
+        goal turns one hauler into the site supplier; other ships keep their
+        natural role (mining/trading funds the build)."""
+        role = classify_ship(ship)
+        if (self.goal == "construct" and self.construct_waypoint and role == "trader"
+                and not any(getattr(b, "_role", "") == "construct" for b in self.bots.values())):
+            return "construct"
+        return role
 
     def _default_spawn(self, bot) -> None:
         t = threading.Thread(target=bot.run, daemon=True, name=f"orch-{bot.ship}")
@@ -145,7 +166,7 @@ class Orchestrator:
         sym = ship["symbol"]
         if sym in self.bots:
             return
-        role = classify_ship(ship)
+        role = self._role_for(ship)
         bot = self._make_bot(sym, role)
         self.bots[sym] = bot
         self._spawn(bot)
@@ -210,7 +231,8 @@ class Orchestrator:
                     symbols = {s["symbol"] for s in ships}
                     self._reap(symbols)
                     self._reap_dead()
-                    if self.auto_contracts and self._contract_mgr is None and ships:
+                    want_contracts = self.auto_contracts or self.goal == "contracts"
+                    if want_contracts and self._contract_mgr is None and ships:
                         self._start_contract_mgr(ships[0]["symbol"])
                     for ship in ships:
                         self._deploy(ship)

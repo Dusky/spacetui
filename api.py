@@ -289,6 +289,17 @@ class Client:
     def jump_gate(self, system: str, waypoint: str) -> dict:
         return self.get(f"/systems/{system}/waypoints/{waypoint}/jump-gate")["data"]
 
+    def construction(self, system: str, waypoint: str) -> dict:
+        return self.get(f"/systems/{system}/waypoints/{waypoint}/construction")["data"]
+
+    def supply_construction(
+        self, system: str, waypoint: str, ship: str, trade_symbol: str, units: int
+    ) -> dict:
+        return self.post(
+            f"/systems/{system}/waypoints/{waypoint}/construction/supply",
+            json={"shipSymbol": ship, "tradeSymbol": trade_symbol, "units": int(units)},
+        )["data"]
+
     # -- account / registration -------------------------------------------
     @classmethod
     def register(

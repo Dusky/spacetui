@@ -157,6 +157,8 @@ class Hub:
                         "max_ships": orch.max_ships,
                         "cross_system": orch.cross_system,
                         "auto_contracts": orch.auto_contracts,
+                        "goal": orch.goal,
+                        "construct_waypoint": orch.construct_waypoint,
                     } if orch else {},
                 },
                 "bots": bots,
@@ -196,6 +198,8 @@ class Hub:
             max_ships=int(opts["max_ships"]) if opts.get("max_ships") else None,
             cross_system=bool(opts.get("cross_system")),
             auto_contracts=bool(opts.get("auto_contracts")),
+            goal=opts.get("goal") or "grow",
+            construct_waypoint=opts.get("construct_waypoint") or None,
             world=self.world,
             on_log=lambda m: self.log(m),
         )

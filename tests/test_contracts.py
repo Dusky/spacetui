@@ -4,7 +4,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from contracts import ContractManager, pick_contract_action
+from contracts import (
+    ContractManager,
+    contract_reward,
+    estimate_contract_cost,
+    is_winnable,
+    pick_contract_action,
+)
 
 NOW = dt.datetime(2026, 7, 8, tzinfo=dt.timezone.utc)
 
@@ -32,6 +38,36 @@ def test_skip_expired_pending():
 def test_negotiate_when_none():
     assert pick_contract_action([], now=NOW) == ("negotiate", None)
     assert pick_contract_action([contract("done", fulfilled=True)], now=NOW) == ("negotiate", None)
+
+
+def paying_contract(cid, on_accept, on_fulfil, need=100, deadline=None):
+    c = contract(cid, deadline=deadline)
+    c["terms"]["payment"] = {"onAccepted": on_accept, "onFulfilled": on_fulfil}
+    c["terms"]["deliver"][0]["unitsRequired"] = need
+    return c
+
+
+def test_contract_reward_and_cost_math():
+    c = paying_contract("p1", 10_000, 90_000, need=100)
+    assert contract_reward(c) == 100_000
+    # 100 units @ 200c each = 20_000 estimated buy cost
+    assert estimate_contract_cost(c, lambda g: 200) == 20_000
+    # unknown price -> optimistic zero
+    assert estimate_contract_cost(c, lambda g: None) == 0
+
+
+def test_winnable_declines_unprofitable_contract():
+    c = paying_contract("p2", 0, 5_000, need=100)     # pays 5k
+    # materials would cost 100 * 200 = 20k -> a loss, so decline
+    assert is_winnable(c, now=NOW, price_of=lambda g: 200) is False
+    # with cheap materials (50c -> 5k cost) it just breaks even and is winnable
+    assert is_winnable(c, now=NOW, price_of=lambda g: 50) is True
+
+
+def test_pick_skips_unwinnable_and_negotiates():
+    bad = paying_contract("bad", 0, 5_000, need=100)
+    action, cid = pick_contract_action([bad], now=NOW, price_of=lambda g: 200)
+    assert action == "negotiate"
 
 
 class FakeClient:

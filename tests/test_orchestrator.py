@@ -134,6 +134,38 @@ def test_miner_no_contract_without_manager():
     assert bot.get_contract() is None
 
 
+def test_default_goal_is_grow():
+    orch, _ = make_orch(FakeClient([]))
+    assert orch.goal == "grow"
+
+
+def test_invalid_goal_falls_back_to_grow():
+    orch, _ = make_orch(FakeClient([]), goal="bogus")
+    assert orch.goal == "grow"
+
+
+def test_construct_goal_assigns_one_supplier():
+    fleet = [
+        ship("HAUL1", cargo_cap=60),   # trader-capable
+        ship("HAUL2", cargo_cap=60),   # trader-capable
+        ship("M", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30),  # miner
+    ]
+    orch, deployed = make_orch(
+        FakeClient(fleet), goal="construct", construct_waypoint="X1-HQ-GATE")
+    for s in fleet:
+        orch._deploy(s)
+    roles = dict(deployed)
+    assert list(roles.values()).count("construct") == 1  # exactly one supplier
+    assert roles["M"] == "miner"                          # miner still funds the build
+    assert getattr(orch.bots["M"], "_role") == "miner"
+
+
+def test_explore_goal_enables_scout_charting():
+    orch, _ = make_orch(FakeClient([]), goal="explore")
+    bot = orch._make_bot("PROBE", "scout")
+    assert bot.explore is True
+
+
 class _DeadThread:
     def is_alive(self):
         return False

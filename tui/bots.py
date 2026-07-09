@@ -11,6 +11,7 @@ import store
 import world as world_mod
 from api import ApiError, Client
 from arbitrage import demand_factor, price_ceiling, price_floor, sustainable_units
+from construction import cheapest_source, is_complete, materials_gap, next_material
 from routing import build_graph, shortest_path, system_of
 
 
@@ -799,6 +800,7 @@ class ScoutBot(BaseBot):
         max_hops: int = 1,
         max_age_s: float = 600.0,
         dwell: int = 45,
+        explore: bool = False,
         world=None,
         on_log=None,
         on_status=None,
@@ -808,9 +810,24 @@ class ScoutBot(BaseBot):
         self.max_hops = max_hops
         self.max_age_s = max_age_s
         self.dwell = dwell
+        # explore mode: also chart UNCHARTED waypoints to widen the world model
+        self.explore = explore
+
+    def _chart_here(self, system: str, here: str) -> None:
+        """Chart the current waypoint if it's still uncharted (explore goal)."""
+        if not self.explore or self.world is None:
+            return
+        for w in self.world.get_waypoints(system):
+            if w["symbol"] == here and "UNCHARTED" in (w.get("traits") or []):
+                try:
+                    self.c.chart(self.ship)
+                    self._log(f"charted {here}")
+                except ApiError as e:
+                    self._log(f"chart skipped: {e.message}")
+                return
 
     def run(self) -> None:
-        self._log("scout engaged")
+        self._log("scout engaged" + (" (explore)" if self.explore else ""))
         try:
             while not self._cancel.is_set():
                 s = self._await_arrival()
@@ -818,6 +835,7 @@ class ScoutBot(BaseBot):
                 system = nav.get("systemSymbol", "")
                 here = nav.get("waypointSymbol", "")
 
+                self._chart_here(system, here)
                 self._record_here(system, here)
                 if self.cross_system:
                     self._map_gate(system)
@@ -836,6 +854,110 @@ class ScoutBot(BaseBot):
                 # everything fresh — idle, then loop to re-scan as prices age out
                 self._status(mode="scout", last="all fresh; dwelling")
                 self._sleep(self.dwell)
+        except BotCancelled:
+            pass
+        except Exception as e:
+            self._log(f"halted: {e!r}")
+        finally:
+            self._status(mode="stopped", last="idle")
+            self._log("disengaged")
+
+
+class ConstructionBot(BaseBot):
+    """Supplies a construction site (the endgame jump gate).
+
+    Buys the cheapest known source of each still-needed material and delivers it
+    to the site via the ``construct`` endpoint, until the site is complete. When
+    no market for a needed good is known yet, it scans in-system to find one.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        ship: str,
+        *,
+        target: str,
+        world=None,
+        on_log=None,
+        on_status=None,
+    ):
+        super().__init__(client, ship, world=world, on_log=on_log, on_status=on_status)
+        self.target = target                      # construction-site waypoint
+        self.target_system = system_of(target)
+
+    def _supply(self, s: dict, good: str, units: int) -> dict:
+        s = self._goto(s, self.target)
+        if s.get("nav", {}).get("status") != "DOCKED":
+            self.c.dock(self.ship)
+        try:
+            res = self.c.supply_construction(self.target_system, self.target, self.ship, good, units)
+            self._log(f"supplied {units} {good} → {self.target}")
+            return res.get("construction", {})
+        except ApiError as e:
+            self._log(f"supply failed: {e.message}")
+            return {}
+
+    def _acquire(self, s: dict, good: str, need: int) -> None:
+        obs = store.latest_prices(max_age_s=self.max_age_s)
+        wp, price = cheapest_source(good, obs)
+        if not wp:
+            self._log(f"no known market sells {good}; scanning")
+            here = s.get("nav", {}).get("waypointSymbol", "")
+            nxt = self._next_unscanned_market(self.target_system, here)
+            if nxt:
+                self._goto(s, nxt)
+            else:
+                self._sleep(30)
+            return
+        capacity = s.get("cargo", {}).get("capacity", 0) or need
+        want = min(need, capacity)
+        s = self._goto(s, wp)
+        self.c.dock(self.ship)
+        self._maybe_refuel()
+        bought = 0
+        while bought < want and not self._cancel.is_set():
+            try:
+                data = self.c.purchase(self.ship, good, want - bought)
+            except ApiError as e:
+                self._log(f"buy stopped: {e.message}")
+                break
+            t = data.get("transaction", {})
+            got = t.get("units", 0)
+            if got <= 0:
+                break
+            bought += got
+            store.record_trade("buy", good, got, t.get("pricePerUnit", 0),
+                               t.get("totalPrice", 0), ship=self.ship, waypoint=wp)
+            self._log(f"bought {got} {good} @ {t.get('pricePerUnit')}c for construction")
+        self._record_here(self.target_system, wp, fresh=True)
+
+    def run(self) -> None:
+        self._log(f"construction supplier engaged → {self.target}")
+        try:
+            while not self._cancel.is_set():
+                s = self._await_arrival()
+                try:
+                    con = self.c.construction(self.target_system, self.target)
+                except ApiError as e:
+                    self._log(f"no construction site at {self.target}: {e.message}")
+                    return
+                if is_complete(con):
+                    self._log("construction complete ✓")
+                    return
+                gap = materials_gap(con)
+                # already carrying something the site needs? deliver it first
+                inv = {i["symbol"]: i["units"]
+                       for i in s.get("cargo", {}).get("inventory", [])}
+                carrying = next((g for g in gap if inv.get(g)), None)
+                if carrying:
+                    self._status(mode="supply", last=f"→ {self.target}")
+                    self._supply(s, carrying, min(gap[carrying], inv[carrying]))
+                    continue
+                good = next_material(con, store.latest_prices(max_age_s=self.max_age_s))
+                if not good:
+                    continue
+                self._status(mode="buy", last=f"source {good}")
+                self._acquire(s, good, gap[good])
         except BotCancelled:
             pass
         except Exception as e:
