@@ -230,22 +230,33 @@ function gauge(label, cur, cap, color) {
 }
 function fleetActions(ship) {
   const p = el("div", "panel");
-  p.innerHTML = `<div class="phead">ACTIONS · ${ship}</div>`;
+  p.innerHTML = `<div class="phead">ACTIONS · ${ship}</div>
+    <div class="ohint" style="margin:0 0 8px">one-shot commands for this ship — dock/refuel at a market, orbit &amp; extract at an asteroid field, or send it somewhere.</div>`;
   const row = el("div", "row");
   const acts = [["orbit", "Orbit"], ["dock", "Dock"], ["refuel", "Refuel"], ["extract", "Extract"], ["sell", "Sell All"]];
   for (const [k, lbl] of acts) { const b = el("button", "", lbl); b.onclick = async () => { await postJSON("/api/fleet", { ship, action: k }); poll(); }; row.appendChild(b); }
-  const wp = el("input"); wp.placeholder = "waypoint e.g. X1-N85-B9";
-  const go = el("button", "btn primary", "Go →");
-  go.onclick = async () => { await postJSON("/api/fleet", { ship, action: "navigate", waypoint: wp.value.trim() }); poll(); };
-  row.appendChild(wp); row.appendChild(go);
-  p.appendChild(row); return p;
+  const send = el("div", "row"); send.style.marginTop = "8px";
+  send.appendChild(el("label", "flabel", "Send to"));
+  const wp = el("input"); wp.style.width = "220px";
+  const go = el("button", "btn primary", "Navigate →");
+  go.onclick = async () => {
+    const t = wp.value.trim();
+    if (!t) return;
+    await postJSON("/api/fleet", { ship, action: "navigate", waypoint: t }); poll();
+  };
+  send.appendChild(wp); send.appendChild(go);
+  send.appendChild(el("span", "dim", "a waypoint in this system (open the Map to pick one)"));
+  p.appendChild(row); p.appendChild(send); return p;
 }
 
 function vContracts() {
   const cs = state.contracts || [];
   const m = $("#main");
   m.innerHTML = head("§ CONTRACTS", "accept procurements · deliver · bank the payout");
-  if (!cs.length) { m.innerHTML += `<p class="muted">no contracts</p>`; return; }
+  if (!cs.length) {
+    m.innerHTML += `<p class="muted" style="max-width:640px;line-height:1.6">No contracts yet. Negotiate one from a ship docked at a faction waypoint (usually your HQ), or turn on <b>auto-contracts</b> in ★ Mission and the fleet will negotiate, accept and fulfil them for you.</p>`;
+    return;
+  }
   for (const c of cs) {
     const p = el("div", "panel");
     const terms = c.terms || {}, pay = terms.payment || {};
@@ -274,9 +285,11 @@ async function vMarkets() {
       : `<tr><td colspan="5" class="muted">no routes yet — run a trader/scout to gather prices</td></tr>`) + `</table>`;
   m.appendChild(p);
   const look = el("div", "panel");
-  look.innerHTML = `<div class="phead">MARKET LOOKUP</div>`;
+  look.innerHTML = `<div class="phead">MARKET LOOKUP</div>
+    <div class="ohint" style="margin:0 0 8px">fetch a specific market's live buy/sell prices. A ship must be at that waypoint for prices to show — otherwise you'll only see which goods it trades.</div>`;
   const row = el("div", "row");
-  const inp = el("input"); inp.placeholder = "waypoint e.g. X1-N85-A1";
+  row.appendChild(el("label", "flabel", "Waypoint"));
+  const inp = el("input"); inp.style.width = "220px";
   const b = el("button", "btn", "Fetch");
   const out = el("div"); out.style.marginTop = "8px";
   b.onclick = async () => {
@@ -293,7 +306,8 @@ async function vMarkets() {
 let shipTypes = null;  // cached list of {type, price} for the reinvest dropdown
 function fillShipTypes(sel) {
   const cur = sel.value;
-  sel.innerHTML = `<option value="">reinvest: — off —</option>` +
+  sel.innerHTML = `<option value="">— off (bank the profit) —</option>` +
+    `<option value="AUTO">AUTO — buy what the fleet needs</option>` +
     (shipTypes || []).map(s => `<option value="${s.type}">${s.type}${s.price ? ` (${fmt(s.price)}c)` : ""}</option>`).join("");
   sel.value = cur;
 }
@@ -440,29 +454,46 @@ function orchestratorPanel() {
     row.appendChild(btn); row.appendChild(el("span", "muted", "running · " + bits.join(" · ")));
     bar.appendChild(row);
   } else {
-    const goalRow = el("div", "row"); goalRow.style.marginBottom = "8px";
-    goalRow.innerHTML = `<label class="muted">goal</label>
-      <select id="o-goal" style="width:360px">` +
-      GOALS.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join("") + `</select>
-      <input id="o-construct" placeholder="construction waypoint" style="width:200px;display:none">`;
-    bar.appendChild(goalRow);
-    const cfg = el("div", "row"); cfg.style.marginBottom = "8px";
-    cfg.innerHTML = `
-      <select id="o-expand" style="width:280px"><option value="">reinvest: — off —</option></select>
-      <input id="o-buffer" type="number" placeholder="reserve" value="100000" style="width:120px">
-      <input id="o-max" type="number" placeholder="max ships" style="width:110px">
-      <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>
-      <label class="muted"><input id="o-contracts" type="checkbox"> auto-contracts</label>`;
-    bar.appendChild(cfg);
+    const desc = el("div", "ohelp");
+    desc.textContent = "Runs the whole fleet hands-off: it classifies each ship, "
+      + "deploys a miner / trader / scout, restarts any that die, and works toward "
+      + "your goal — optionally reinvesting profit into more ships.";
+    bar.appendChild(desc);
+    const form = el("div");
+    form.innerHTML = `
+      <div class="ofield"><label>Goal</label><div>
+        <select id="o-goal">${GOALS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+        <input id="o-construct" style="display:none;width:320px">
+        <div class="ohint">what the fleet works toward. <b>grow</b> mines &amp; trades; <b>construct</b> supplies a jump-gate site (enter its waypoint, e.g. X1-AF2-I52); <b>explore</b> charts the map.</div>
+      </div></div>
+      <div class="ofield"><label>Reinvest</label><div>
+        <select id="o-expand"><option value="">— off (bank the profit) —</option></select>
+        <div class="ohint">buy this ship type when you can afford it, to grow the fleet. Pick <b>AUTO</b> to let it choose what the fleet needs.</div>
+      </div></div>
+      <div class="ofield"><label>Reserve</label><div>
+        <input id="o-buffer" type="number" value="100000" style="width:150px"> <span class="dim">credits</span>
+        <div class="ohint">never spend below this balance when reinvesting — your safety cushion.</div>
+      </div></div>
+      <div class="ofield"><label>Max ships</label><div>
+        <input id="o-max" type="number" style="width:150px"> <span class="dim">leave blank for unlimited</span>
+        <div class="ohint">stop buying once the fleet reaches this size.</div>
+      </div></div>
+      <div class="ofield"><label>Options</label><div>
+        <label class="ocheck"><input id="o-cross" type="checkbox"> cross-system</label>
+        <label class="ocheck"><input id="o-contracts" type="checkbox"> auto-contracts</label>
+        <div class="ohint"><b>cross-system</b>: let traders &amp; scouts range across jump gates. <b>auto-contracts</b>: negotiate, accept &amp; fulfil procurement contracts.</div>
+      </div></div>`;
+    bar.appendChild(form);
     // reveal the construct-waypoint input only for the construct goal
-    goalRow.querySelector("#o-goal").onchange = (e) => {
-      goalRow.querySelector("#o-construct").style.display = e.target.value === "construct" ? "" : "none";
+    form.querySelector("#o-goal").onchange = (e) => {
+      form.querySelector("#o-construct").style.display = e.target.value === "construct" ? "" : "none";
     };
-    // populate the reinvest dropdown from ship types your shipyards actually sell
-    const sel = cfg.querySelector("#o-expand");
+    // populate the reinvest dropdown from ship types your shipyards actually sell,
+    // plus an AUTO option for bottleneck-aware buying
+    const sel = form.querySelector("#o-expand");
     if (shipTypes) fillShipTypes(sel);
     else getJSON("/api/shiptypes").then(t => { shipTypes = t; const s = $("#o-expand"); if (s) fillShipTypes(s); });
-    const row = el("div", "row");
+    const row = el("div", "row"); row.style.marginTop = "12px";
     const btn = el("button", "btn primary", "🚀 Orchestrate Fleet");
     btn.onclick = async () => {
       await postJSON("/api/orchestrator", {
@@ -477,21 +508,30 @@ function orchestratorPanel() {
       });
       poll();
     };
-    row.appendChild(btn); row.appendChild(el("span", "muted", "idle — pick a goal, then deploy a bot per ship"));
+    row.appendChild(btn);
     bar.appendChild(row);
   }
   return bar;
 }
 
+function alertRow(a) {
+  const d = el("div", "alert " + (a.level || "info"));
+  d.innerHTML = `<span class="adot"></span>${a.msg}`;
+  return d;
+}
 function alertFeed() {
   const p = el("div", "panel"); p.innerHTML = `<div class="phead">ALERTS</div>`;
-  if (!alertBuf.length) { p.appendChild(el("div", "muted", "all clear")); return p; }
-  for (const a of alertBuf.slice(-20).reverse()) {
-    const d = el("div", "alert " + (a.level || "info"));
-    d.innerHTML = `<span class="adot"></span>${a.msg}`;
-    p.appendChild(d);
-  }
+  const list = el("div"); list.id = "alert-feed";
+  if (!alertBuf.length) list.appendChild(el("div", "muted", "all clear"));
+  else for (const a of alertBuf.slice(-20).reverse()) list.appendChild(alertRow(a));
+  p.appendChild(list);
   return p;
+}
+// add a newly-arrived alert to the feed in place (no full re-render/refetch)
+function pushAlertRow(a) {
+  const list = $("#alert-feed"); if (!list) return;
+  const empty = list.querySelector(".muted"); if (empty) empty.remove();
+  list.insertBefore(alertRow(a), list.firstChild);
 }
 
 async function vMission() {
@@ -640,46 +680,96 @@ function renderSetup() {
     if (r.ok) { boot(); } else { err(r.error || "setup failed"); }
   };
   const p1 = el("div", "panel");
-  p1.innerHTML = `<div class="phead">I HAVE AN AGENT TOKEN</div>`;
-  const r1 = el("div", "row");
-  const t = el("input"); t.placeholder = "paste agent token"; t.style.width = "420px";
-  const b1 = el("button", "btn primary", "Sign in");
+  p1.innerHTML = `<div class="phead">I ALREADY HAVE AN AGENT</div>
+    <div class="ohelp">Paste your <b>agent token</b> — the long token you got when the agent was created. It's saved to <span class="dim">.env</span> on this machine so you only do this once.</div>`;
+  const f1 = el("div", "ofield");
+  f1.appendChild(el("label", null, "Agent token"));
+  const t1box = el("div");
+  const t = el("input"); t.style.width = "440px";
+  const b1 = el("button", "btn primary", "Sign in"); b1.style.marginLeft = "8px";
   b1.onclick = () => submit({ mode: "token", token: t.value.trim() });
-  r1.append(t, b1); p1.appendChild(r1); m.appendChild(p1);
+  t1box.append(t, b1);
+  f1.appendChild(t1box); p1.appendChild(f1); m.appendChild(p1);
 
   const p2 = el("div", "panel");
-  p2.innerHTML = `<div class="phead">REGISTER A NEW AGENT</div><div class="muted" style="font-size:12px;margin-bottom:8px">needs an account token from spacetraders.io</div>`;
-  const r2 = el("div", "row");
-  const acc = el("input"); acc.placeholder = "account token"; acc.style.width = "300px";
-  const call = el("input"); call.placeholder = "callsign (3-14)"; call.style.width = "150px";
-  const fac = el("input"); fac.placeholder = "faction"; fac.value = "COSMIC"; fac.style.width = "120px";
-  const b2 = el("button", "btn gold", "Register");
+  p2.innerHTML = `<div class="phead">REGISTER A NEW AGENT</div>
+    <div class="ohelp">Creates a fresh agent. You need an <b>account token</b> from your profile at <span class="dim">spacetraders.io</span>. Pick a unique callsign and a starting faction (COSMIC is the usual default).</div>`;
+  const mk = (label, hint, width, val) => {
+    const f = el("div", "ofield");
+    f.appendChild(el("label", null, label));
+    const box = el("div");
+    const inp = el("input"); inp.style.width = width; if (val) inp.value = val;
+    box.appendChild(inp);
+    box.appendChild(el("div", "ohint", hint));
+    f.appendChild(box); p2.appendChild(f);
+    return inp;
+  };
+  const acc = mk("Account token", "from your account page on spacetraders.io", "360px");
+  const call = mk("Callsign", "3–14 characters, unique across the game (becomes your agent's name)", "220px");
+  const fac = mk("Faction", "the faction you start with — COSMIC unless you know otherwise", "180px", "COSMIC");
+  const b2 = el("button", "btn gold", "Register"); b2.style.marginTop = "6px";
   b2.onclick = () => submit({ mode: "register", account_token: acc.value.trim(), callsign: call.value.trim(), faction: fac.value.trim() });
-  r2.append(acc, call, fac, b2); p2.appendChild(r2); m.appendChild(p2);
+  p2.appendChild(b2); m.appendChild(p2);
 }
 
 /* ---------- live updates (SSE, with polling fallback) ---------- */
-function applyState(s) {
+// Views that read `state` directly and are cheap to rebuild live. The rest
+// (mission/analytics/markets/map) fetch their own data and render on entry, so
+// we don't rebuild them on every background poll (that was the whole-page flicker
+// + the /api/metrics + /api/alerts spam every few seconds).
+const LIVE_VIEWS = new Set(["overview", "fleet", "contracts", "automation"]);
+let lastSig = "";
+// a signature of just the fields the live views render, so a background poll that
+// changed nothing (e.g. ships mid-transit) doesn't rebuild the DOM at all.
+function stateSig(s) {
+  return JSON.stringify({
+    a: (s.agent || {}).credits,
+    n: (s.agent || {}).shipCount,
+    ships: (s.ships || []).map(x => [x.symbol, (x.nav || {}).status, (x.nav || {}).waypointSymbol,
+      (x.fuel || {}).current, (x.cargo || {}).units]),
+    bots: s.bots,
+    orun: (s.orchestrator || {}).running,
+    roster: (s.orchestrator || {}).roster,
+    contracts: (s.contracts || []).map(c => [c.id, c.accepted, c.fulfilled]),
+  });
+}
+// don't rebuild the view out from under someone typing into a field
+function editingForm() {
+  const a = document.activeElement;
+  return a && a.closest && a.closest("#main") && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+}
+function applyState(s, background) {
   state = s;
   if (s && s.configured === false) { renderSetup(); return; }
-  updateChrome(); render();
+  updateChrome();
+  if (background) {
+    if (editingForm()) return;
+    if (!LIVE_VIEWS.has(view)) return;   // self-fetching views refresh on entry/action
+    const sig = stateSig(s);
+    if (sig === lastSig) return;         // nothing the current view cares about changed
+    lastSig = sig;
+  } else {
+    lastSig = stateSig(s);
+  }
+  render();
 }
-async function poll() {
-  try { applyState(await getJSON("/api/state")); } catch (e) { /* keep last */ }
+async function poll(background) {
+  try { applyState(await getJSON("/api/state"), background); } catch (e) { /* keep last */ }
 }
 let pollTimer = null, es = null;
-function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 4000); } }
+function startPolling() { if (!pollTimer) { poll(false); pollTimer = setInterval(() => poll(true), 4000); } }
 
 function connect() {
   if (es) { try { es.close(); } catch (e) {} }
   try { es = new EventSource("/api/stream"); } catch (e) { startPolling(); return; }
-  es.addEventListener("state", e => applyState(JSON.parse(e.data)));
+  es.addEventListener("state", e => applyState(JSON.parse(e.data), true));
   es.addEventListener("log", e => pushLog(JSON.parse(e.data)));
   es.addEventListener("alert", e => {
     const a = JSON.parse(e.data);
-    if (!alertBuf.some(o => o.msg === a.msg)) alertBuf.push(a);
+    if (alertBuf.some(o => o.msg === a.msg)) return;
+    alertBuf.push(a);
     if (alertBuf.length > 60) alertBuf.shift();
-    if (view === "mission") render();
+    if (view === "mission") pushAlertRow(a);   // update the feed in place, no refetch
   });
   es.onopen = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
   es.onerror = () => { startPolling(); };

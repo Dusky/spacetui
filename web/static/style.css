@@ -57,6 +57,17 @@ h2.title { color: var(--cyan); margin: 0 0 2px; font-size: 16px; letter-spacing:
 .stat.pink { border-left-color: var(--pink); } .stat.pink .value { color: var(--pink); }
 .stat.danger { border-left-color: var(--danger); } .stat.danger .value { color: var(--danger); }
 
+/* orchestrator config form (labeled fields + hints) */
+.ohelp { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin-bottom: 12px; max-width: 640px; }
+.ofield { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 12px; }
+.ofield > label { width: 92px; flex: 0 0 auto; padding-top: 7px; color: var(--muted);
+  text-transform: uppercase; font-size: 11px; letter-spacing: 1px; }
+.ohint { color: var(--dim); font-size: 11.5px; margin-top: 4px; max-width: 600px; line-height: 1.5; }
+.ohint b { color: var(--muted); font-weight: 600; }
+.ocheck { color: var(--muted); margin-right: 18px; }
+.ocheck input { margin-right: 5px; vertical-align: middle; }
+.flabel { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 1px; margin-right: 4px; }
+
 /* mission-control alert feed */
 .alert { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
   margin: 4px 0; background: var(--panel2); font-size: 13px; }
