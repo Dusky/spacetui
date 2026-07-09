@@ -55,6 +55,14 @@ h2.title { color: var(--cyan); margin: 0 0 2px; font-size: 16px; letter-spacing:
 .stat.gold { border-left-color: var(--gold); } .stat.gold .value { color: var(--gold); }
 .stat.green { border-left-color: var(--green); } .stat.green .value { color: var(--green); }
 .stat.pink { border-left-color: var(--pink); } .stat.pink .value { color: var(--pink); }
+.stat.danger { border-left-color: var(--danger); } .stat.danger .value { color: var(--danger); }
+
+/* mission-control alert feed */
+.alert { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  margin: 4px 0; background: var(--panel2); font-size: 13px; }
+.alert .adot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.alert.warn { color: var(--text); } .alert.warn .adot { background: var(--danger); }
+.alert.info { color: var(--muted); } .alert.info .adot { background: var(--gold); }
 
 /* ship + cards */
 .ship { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }

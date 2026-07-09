@@ -15,10 +15,12 @@ import time
 from collections import deque
 
 import config
+import metrics as metrics_mod
 import store
 import world as world_mod
 from api import ApiError, Client
 from orchestrator import Orchestrator, classify_ship
+from ratelimit import LIMITER
 from tui.bots import MinerBot, ScoutBot, TraderBot
 
 _BOT_CLASSES = {"mine": MinerBot, "trade": TraderBot, "scout": ScoutBot}
@@ -43,6 +45,52 @@ class Hub:
         self._poller: threading.Thread | None = None
         self._stop = threading.Event()
         self._subs: set = set()  # SSE subscriber queues
+        self._last_alerts: set = set()  # alert msgs already pushed (de-dupe SSE)
+
+    # -- active ships (have a running bot) ---------------------------------
+    def _active_symbols(self) -> set[str]:
+        active = {sym for sym, b in self.bots.items() if not b.cancelled}
+        if self.orchestrator and self.orchestrator.running:
+            active |= set(self.orchestrator.roster())
+        return active
+
+    # -- KPIs & alerts (mission control) -----------------------------------
+    def metrics(self) -> dict:
+        with self._lock:
+            ships = list(self._ships)
+        roi = metrics_mod.roi_per_ship(store.ship_pnl(), store.ship_assignments())
+        active = self._active_symbols() & {s.get("symbol") for s in ships}
+        return {
+            "credits_per_hour": round(metrics_mod.profit_per_hour(store.credit_series(limit=500))),
+            "roi": roi[:20],
+            "by_role": metrics_mod.role_contribution(roi),
+            "utilization": metrics_mod.fleet_utilization(len(ships), len(active)),
+            "api": LIMITER.status(),
+            "pnl": store.pnl_summary(),
+        }
+
+    def alerts(self) -> list[dict]:
+        with self._lock:
+            ships = list(self._ships)
+            contracts = list(self._contracts)
+        pph = metrics_mod.profit_per_hour(store.credit_series(limit=500))
+        return metrics_mod.derive_alerts(
+            ships, self._active_symbols(), pph, contracts,
+            orch_running=bool(self.orchestrator and self.orchestrator.running),
+            api_blocked_for=LIMITER.status()["blocked_for"],
+        )
+
+    def _push_alerts(self) -> None:
+        """Publish only alerts we haven't already sent this cycle (avoid spam)."""
+        try:
+            current = self.alerts()
+        except Exception:  # noqa - alerts must never break the poll
+            return
+        msgs = {a["msg"] for a in current}
+        fresh = [a for a in current if a["msg"] not in self._last_alerts]
+        self._last_alerts = msgs
+        for a in fresh:
+            self._publish("alert", a)
 
     # -- ship types for sale (feeds the reinvest dropdown) -----------------
     def ship_types(self, system: str | None = None) -> list[dict]:
@@ -112,6 +160,7 @@ class Hub:
         except Exception:
             pass
         self._push_state()
+        self._push_alerts()
 
     def start_poller(self, interval: float = 5.0) -> None:
         if self._poller and self._poller.is_alive():

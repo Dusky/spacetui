@@ -171,6 +171,18 @@ def create_app(
     def api_price(good):
         return jsonify(store.price_series(good, limit=300))
 
+    @app.get("/api/metrics")
+    def api_metrics():
+        if hub() is None:
+            return jsonify({"configured": False})
+        return jsonify(hub().metrics())
+
+    @app.get("/api/alerts")
+    def api_alerts():
+        if hub() is None:
+            return jsonify([])
+        return jsonify(hub().alerts())
+
     @app.get("/api/shiptypes")
     def api_shiptypes():
         if hub() is None:

@@ -1,12 +1,19 @@
 "use strict";
 const NAV = [
   ["overview", "◈ Overview", "1"],
-  ["fleet", "⊳ Fleet", "2"],
-  ["contracts", "§ Contracts", "3"],
-  ["markets", "$ Markets", "4"],
-  ["map", "✦ Map", "5"],
-  ["automation", "⚙ Automation", "6"],
-  ["analytics", "📈 Analytics", "7"],
+  ["mission", "★ Mission", "2"],
+  ["fleet", "⊳ Fleet", "3"],
+  ["contracts", "§ Contracts", "4"],
+  ["markets", "$ Markets", "5"],
+  ["map", "✦ Map", "6"],
+  ["automation", "⚙ Automation", "7"],
+  ["analytics", "📈 Analytics", "8"],
+];
+const GOALS = [
+  ["grow", "Grow — reinvest profit into more ships"],
+  ["contracts", "Contracts — keep procurement contracts flowing"],
+  ["construct", "Construct — supply a construction site (jump gate)"],
+  ["explore", "Explore — chart the galaxy, keep prices fresh"],
 ];
 const C = { cyan: "#22d3ee", gold: "#fbbf24", green: "#34d399", pink: "#e879f9",
   danger: "#f87171", muted: "#8590b8", border: "#283358" };
@@ -408,17 +415,23 @@ function showWpPopup(pop, hit) {
   }
 }
 
-function vAutomation() {
-  const m = $("#main");
+/* ---------- mission control (strategy console) ---------- */
+let metricsData = null;   // /api/metrics
+let alertBuf = [];        // recent alerts (SSE-fed + fetched)
+
+// The orchestrator control panel: goal selector + reinvest/reserve/caps. Lives
+// on the Mission console (the operator cockpit).
+function orchestratorPanel() {
   const orch = state.orchestrator || {};
-  m.innerHTML = head("⚙ AUTOMATION", "orchestrate the fleet · per-ship bots · live log");
   const bar = el("div", "panel"); bar.innerHTML = `<div class="phead">FLEET ORCHESTRATOR</div>`;
   if (orch.running) {
     const cfg = orch.config || {};
     const row = el("div", "row");
     const btn = el("button", "btn danger", "■ Stop Orchestrator");
     btn.onclick = async () => { await postJSON("/api/orchestrator", { action: "stop" }); poll(); };
-    const bits = [`${Object.keys(orch.roster || {}).length} deployed`,
+    const bits = [`goal: ${cfg.goal || "grow"}`,
+      cfg.goal === "construct" && cfg.construct_waypoint ? `→ ${cfg.construct_waypoint}` : null,
+      `${Object.keys(orch.roster || {}).length} deployed`,
       cfg.expand ? `reinvest ${cfg.expand}` : "no reinvest",
       `reserve ${fmt(cfg.credit_buffer)}c`,
       cfg.max_ships ? `cap ${cfg.max_ships}` : null,
@@ -427,16 +440,25 @@ function vAutomation() {
     row.appendChild(btn); row.appendChild(el("span", "muted", "running · " + bits.join(" · ")));
     bar.appendChild(row);
   } else {
+    const goalRow = el("div", "row"); goalRow.style.marginBottom = "8px";
+    goalRow.innerHTML = `<label class="muted">goal</label>
+      <select id="o-goal" style="width:360px">` +
+      GOALS.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join("") + `</select>
+      <input id="o-construct" placeholder="construction waypoint" style="width:200px;display:none">`;
+    bar.appendChild(goalRow);
     const cfg = el("div", "row"); cfg.style.marginBottom = "8px";
     cfg.innerHTML = `
-      <select id="o-expand" style="width:300px"><option value="">reinvest: — off —</option></select>
+      <select id="o-expand" style="width:280px"><option value="">reinvest: — off —</option></select>
       <input id="o-buffer" type="number" placeholder="reserve" value="100000" style="width:120px">
       <input id="o-max" type="number" placeholder="max ships" style="width:110px">
       <label class="muted"><input id="o-cross" type="checkbox"> cross-system</label>
       <label class="muted"><input id="o-contracts" type="checkbox"> auto-contracts</label>`;
     bar.appendChild(cfg);
-    // populate the reinvest dropdown from ship types your shipyards actually sell.
-    // query within cfg (not the document) — bar isn't appended to #main yet.
+    // reveal the construct-waypoint input only for the construct goal
+    goalRow.querySelector("#o-goal").onchange = (e) => {
+      goalRow.querySelector("#o-construct").style.display = e.target.value === "construct" ? "" : "none";
+    };
+    // populate the reinvest dropdown from ship types your shipyards actually sell
     const sel = cfg.querySelector("#o-expand");
     if (shipTypes) fillShipTypes(sel);
     else getJSON("/api/shiptypes").then(t => { shipTypes = t; const s = $("#o-expand"); if (s) fillShipTypes(s); });
@@ -445,6 +467,8 @@ function vAutomation() {
     btn.onclick = async () => {
       await postJSON("/api/orchestrator", {
         action: "start",
+        goal: $("#o-goal").value,
+        construct_waypoint: $("#o-construct").value.trim(),
         expand: $("#o-expand").value.trim().toUpperCase(),
         credit_buffer: $("#o-buffer").value,
         max_ships: $("#o-max").value,
@@ -453,11 +477,61 @@ function vAutomation() {
       });
       poll();
     };
-    row.appendChild(btn); row.appendChild(el("span", "muted", "idle — deploys a bot per ship; reinvests profit if a ship type is set"));
+    row.appendChild(btn); row.appendChild(el("span", "muted", "idle — pick a goal, then deploy a bot per ship"));
     bar.appendChild(row);
   }
-  m.appendChild(bar);
+  return bar;
+}
 
+function alertFeed() {
+  const p = el("div", "panel"); p.innerHTML = `<div class="phead">ALERTS</div>`;
+  if (!alertBuf.length) { p.appendChild(el("div", "muted", "all clear")); return p; }
+  for (const a of alertBuf.slice(-20).reverse()) {
+    const d = el("div", "alert " + (a.level || "info"));
+    d.innerHTML = `<span class="adot"></span>${a.msg}`;
+    p.appendChild(d);
+  }
+  return p;
+}
+
+async function vMission() {
+  const m = $("#main");
+  m.innerHTML = head("★ MISSION CONTROL", "how the operation is doing · declare a goal · watch for trouble");
+  metricsData = await getJSON("/api/metrics");
+  if (view !== "mission") return;  // navigated away during the await
+  const km = metricsData || {};
+  const util = km.utilization || {};
+  const pph = km.credits_per_hour || 0;
+  m.innerHTML += `<div class="grid stat-grid">
+      ${stat("NET WORTH", fmt((state.agent || {}).credits), "green")}
+      ${stat("CREDITS / HR", (pph >= 0 ? "+" : "") + fmt(pph), pph >= 0 ? "gold" : "danger")}
+      ${stat("FLEET ACTIVE", `${util.active || 0}/${util.total || 0}`, "pink")}
+      ${stat("UTILIZATION", (util.pct != null ? util.pct : 0) + "%")}
+      ${stat("REALIZED NET", (((km.pnl || {}).net || 0) >= 0 ? "+" : "") + fmt((km.pnl || {}).net || 0), "gold")}
+      ${stat("API TOKENS", `${(km.api || {}).tokens ?? "—"}/${(km.api || {}).capacity ?? "—"}`)}
+     </div>`;
+  m.appendChild(orchestratorPanel());
+  // alerts: prefer the live buffer, else what /api/metrics-era fetch returns
+  try { const a = await getJSON("/api/alerts"); if (a && a.length) { for (const x of a) if (!alertBuf.some(o => o.msg === x.msg)) alertBuf.push(x); } } catch (e) {}
+  m.appendChild(alertFeed());
+  // ROI per ship
+  const roiP = el("div", "panel"); roiP.innerHTML = `<div class="phead">ROI PER SHIP</div>`;
+  const rows = km.roi || [];
+  if (rows.length) {
+    const t = el("table");
+    t.innerHTML = `<tr><th>Ship</th><th>Role</th><th>Spent</th><th>Earned</th><th>Net</th></tr>` +
+      rows.map(r => `<tr><td>${r.ship}</td><td class="muted">${r.role || "—"}</td>
+        <td class="dim">${fmt(r.spent)}</td><td class="dim">${fmt(r.earned)}</td>
+        <td class="${r.net >= 0 ? "pos" : "neg"}">${r.net >= 0 ? "+" : ""}${fmt(r.net)}c</td></tr>`).join("");
+    roiP.appendChild(t);
+  } else roiP.appendChild(el("div", "muted", "no trades attributed to ships yet — run some bots"));
+  m.appendChild(roiP);
+}
+
+function vAutomation() {
+  const m = $("#main");
+  const orch = state.orchestrator || {};
+  m.innerHTML = head("⚙ AUTOMATION", "per-ship bots · live log · (fleet goals live in ★ Mission)");
   const grid = el("div", "grid card-grid");
   for (const s of state.ships || []) {
     const sym = s.symbol;
@@ -544,8 +618,8 @@ function refreshLog() {
 
 function render() {
   if (!state) return;
-  const fn = { overview: vOverview, fleet: vFleet, contracts: vContracts, markets: vMarkets,
-    map: vMap, automation: vAutomation, analytics: vAnalytics }[view] || vOverview;
+  const fn = { overview: vOverview, mission: vMission, fleet: vFleet, contracts: vContracts,
+    markets: vMarkets, map: vMap, automation: vAutomation, analytics: vAnalytics }[view] || vOverview;
   // never let a view error blank the page on a live re-render
   try { fn(); } catch (e) { console.error("view render failed:", e); }
 }
@@ -597,6 +671,12 @@ function connect() {
   try { es = new EventSource("/api/stream"); } catch (e) { startPolling(); return; }
   es.addEventListener("state", e => applyState(JSON.parse(e.data)));
   es.addEventListener("log", e => pushLog(JSON.parse(e.data)));
+  es.addEventListener("alert", e => {
+    const a = JSON.parse(e.data);
+    if (!alertBuf.some(o => o.msg === a.msg)) alertBuf.push(a);
+    if (alertBuf.length > 60) alertBuf.shift();
+    if (view === "mission") render();
+  });
   es.onopen = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
   es.onerror = () => { startPolling(); };
 }

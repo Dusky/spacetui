@@ -44,6 +44,20 @@ class RateLimiter:
         with self._lock:
             self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
 
+    def status(self) -> dict:
+        """A non-consuming snapshot of the bucket, for the mission-control view:
+        available tokens, burst capacity, and how long a 429 penalty still
+        holds the fleet off (0 when clear)."""
+        with self._lock:
+            now = time.monotonic()
+            self._refill(now)
+            return {
+                "tokens": round(self._tokens, 1),
+                "capacity": self.capacity,
+                "rate": self.rate,
+                "blocked_for": round(max(0.0, self._blocked_until - now), 1),
+            }
+
     def acquire(self) -> None:
         # Loop because, after sleeping, another thread may have drained the
         # bucket (or a penalty may still be in effect).

@@ -315,6 +315,20 @@ def pnl_by_good(limit: int = 8, conn: sqlite3.Connection | None = None) -> list[
     return out[:limit]
 
 
+def ship_pnl(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Per-ship spent/earned totals (feeds ROI-per-ship)."""
+    c = conn or connect()
+    with _lock:
+        rows = c.execute(
+            """SELECT ship,
+                 COALESCE(SUM(CASE WHEN action='buy'  THEN total END), 0) spent,
+                 COALESCE(SUM(CASE WHEN action='sell' THEN total END), 0) earned
+               FROM trades WHERE ship IS NOT NULL AND ship != ''
+               GROUP BY ship"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def recent_trades(limit: int = 12, conn: sqlite3.Connection | None = None) -> list[dict]:
     c = conn or connect()
     with _lock:

@@ -261,6 +261,53 @@ def test_stats_credits_have_timestamps(app):
     assert credits and "t" in credits[0] and "v" in credits[0]
 
 
+def test_metrics_endpoint(app):
+    conn = store.connect()
+    store.record_trade("buy", "IRON", 40, 100, 4000, ship="MDOE-1", conn=conn)
+    store.record_trade("sell", "IRON", 40, 240, 9600, ship="MDOE-1", conn=conn)
+    store.record_ship_assignment("MDOE-1", "trader", conn=conn)
+    m = app.test_client().get("/api/metrics").get_json()
+    assert "credits_per_hour" in m and "utilization" in m and "api" in m
+    roi = {r["ship"]: r for r in m["roi"]}
+    assert roi["MDOE-1"]["net"] == 5600
+    assert roi["MDOE-1"]["role"] == "trader"
+
+
+def test_alerts_endpoint_returns_list(app):
+    a = app.test_client().get("/api/alerts").get_json()
+    assert isinstance(a, list)
+
+
+def test_orchestrator_start_with_goal(app):
+    c = app.test_client()
+    c.post("/api/orchestrator", json={
+        "action": "start", "goal": "construct", "construct_waypoint": "X1-AF2-GATE"})
+    orch = app.hub.orchestrator
+    assert orch.goal == "construct"
+    assert orch.construct_waypoint == "X1-AF2-GATE"
+    cfg = app.hub.snapshot()["orchestrator"]["config"]
+    assert cfg["goal"] == "construct"
+    c.post("/api/orchestrator", json={"action": "stop"})
+    orch._sup.join(timeout=2)
+
+
+def test_alert_event_reaches_subscriber(app):
+    hub = app.hub
+    hub._ships = [{"symbol": "DEAD-1", "fuel": {"current": 0, "capacity": 400},
+                   "nav": {"status": "DOCKED", "waypointSymbol": "X1-AF2-A1"}}]
+    hub._last_alerts = set()
+    q = hub.subscribe()
+    hub._push_alerts()
+    seen = []
+    while True:
+        try:
+            seen.append(q.get(timeout=0.3))
+        except Exception:
+            break
+    hub.unsubscribe(q)
+    assert any(e["event"] == "alert" and "stranded" in e["data"]["msg"] for e in seen)
+
+
 def test_token_auth_blocks_and_allows():
     app = create_app(FakeClient(), start_poller=False, token="sekret")
     app.hub.refresh()
