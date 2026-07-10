@@ -7,6 +7,8 @@ from arbitrage import (
     arbitrage_scan,
     demand_factor,
     estimate_route_rate,
+    market_listings,
+    plan_sales,
     route_units,
 )
 
@@ -118,6 +120,68 @@ def test_scan_ranks_by_rate_not_raw_margin():
     ]
     routes = arbitrage_scan(observations, min_profit=1)
     assert routes[0]["good"] == "GADGET"
+
+
+def test_market_listings_unions_catalogs_and_live_goods():
+    m = {"imports": [{"symbol": "ICE_WATER"}],
+         "exports": [{"symbol": "FUEL"}],
+         "exchange": [{"symbol": "IRON_ORE"}],
+         "tradeGoods": [{"symbol": "FUEL", "sellPrice": 50}]}
+    assert market_listings(m) == {"ICE_WATER", "FUEL", "IRON_ORE"}
+    # catalog-only payload (no ship present) still works; None -> empty
+    assert market_listings({"imports": [{"symbol": "GOLD"}]}) == {"GOLD"}
+    assert market_listings(None) == set()
+
+
+def inv(*goods):
+    return [{"symbol": g, "units": 10} for g in goods]
+
+
+def test_plan_sales_assigns_goods_to_listing_markets():
+    markets = {
+        "A1": {"imports": [{"symbol": "FUEL"}]},                       # buys none of ours
+        "B4": {"imports": [{"symbol": "IRON_ORE"}, {"symbol": "ICE_WATER"}]},
+    }
+    plan, unsellable = plan_sales(inv("IRON_ORE", "ICE_WATER", "QUARTZ_SAND"), markets)
+    assert plan == [("B4", ["ICE_WATER", "IRON_ORE"])]  # never routed to A1
+    assert unsellable == ["QUARTZ_SAND"]
+
+
+def test_plan_sales_prefers_fewest_stops():
+    markets = {
+        "ONE": {"imports": [{"symbol": "A"}]},
+        "BOTH": {"imports": [{"symbol": "A"}, {"symbol": "B"}]},
+    }
+    plan, unsellable = plan_sales(inv("A", "B"), markets)
+    assert plan == [("BOTH", ["A", "B"])]  # one stop beats two
+    assert unsellable == []
+
+
+def test_plan_sales_splits_across_markets_when_needed():
+    markets = {
+        "M1": {"imports": [{"symbol": "A"}]},
+        "M2": {"imports": [{"symbol": "B"}]},
+    }
+    plan, _ = plan_sales(inv("A", "B"), markets)
+    assert sorted(plan) == [("M1", ["A"]), ("M2", ["B"])]
+
+
+def test_plan_sales_price_breaks_coverage_ties():
+    markets = {
+        "CHEAP": {"tradeGoods": [{"symbol": "A", "sellPrice": 10}]},
+        "RICH": {"tradeGoods": [{"symbol": "A", "sellPrice": 90}]},
+    }
+    plan, _ = plan_sales(inv("A"), markets)
+    assert plan == [("RICH", ["A"])]
+
+
+def test_plan_sales_empty_inputs():
+    assert plan_sales([], {"A1": {"imports": []}}) == ([], [])
+    plan, unsellable = plan_sales(inv("A"), {})
+    assert plan == [] and unsellable == ["A"]
+    # a failed market fetch (None payload) is just "lists nothing"
+    plan, unsellable = plan_sales(inv("A"), {"A1": None})
+    assert plan == [] and unsellable == ["A"]
 
 
 def test_demand_factor_eases_on_falling_prices():

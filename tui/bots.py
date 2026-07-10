@@ -9,7 +9,13 @@ import claims
 import store
 import world as world_mod
 from api import ApiError, Client
-from arbitrage import demand_factor, price_ceiling, price_floor, sustainable_units
+from arbitrage import (
+    demand_factor,
+    plan_sales,
+    price_ceiling,
+    price_floor,
+    sustainable_units,
+)
 from construction import cheapest_source, is_complete, materials_gap, next_material
 from routing import build_graph, shortest_path, system_of
 
@@ -173,11 +179,6 @@ class BaseBot:
             self._log(f"scanned {waypoint} ({len(goods)} goods)")
         return m
 
-    def _first_market(self, system: str) -> str | None:
-        for w in self._wps(system, trait="MARKETPLACE"):
-            return w["symbol"]
-        return None
-
     def _next_unscanned_market(self, system: str, here: str) -> str | None:
         fresh = {
             o["waypoint"]
@@ -281,6 +282,8 @@ class MinerBot(BaseBot):
         # optional callable returning the currently-active contract id to adopt
         self.get_contract = get_contract
         self.surveys: list[dict] = []
+        # goods learned to be unsellable in this system (jettisoned on yield)
+        self._unsellable: set[str] = set()
 
     # -- internals ---------------------------------------------------------
     def _has_trait(self, system: str, wp: str, trait: str) -> bool:
@@ -325,7 +328,12 @@ class MinerBot(BaseBot):
                         best, best_score = sv, sc
         return best or self.surveys[0]
 
-    def _sell_off(self, s: dict, contract: dict | None) -> None:
+    def _sell_off(self, s: dict, contract: dict | None) -> bool:
+        """Deliver contract goods, sell the rest where it's actually listed,
+        jettison what nothing in-system buys. Returns True if the hold shrank
+        (sold, delivered or jettisoned anything) so the caller can back off
+        instead of spinning when no progress is possible."""
+        progress = False
         nav = s.get("nav", {})
         inv = s.get("cargo", {}).get("inventory", [])
         # 1) contract delivery (via the /deliver endpoint, not a market sale)
@@ -349,6 +357,7 @@ class MinerBot(BaseBot):
                         )
                         contract = res.get("contract", contract)
                         self._log(f"delivered {take} {d['tradeSymbol']}")
+                        progress = True
                     except ApiError as e:
                         self._log(f"deliver failed: {e.message}")
             # 2) fulfill once every deliverable is complete
@@ -363,37 +372,76 @@ class MinerBot(BaseBot):
                     self.contract_id = None
                 except ApiError as e:
                     self._log(f"fulfill failed: {e.message}")
-        # 3) sell the rest at a market
+        # 3) sell the rest — but only where each good is actually listed. A
+        # market rejects goods outside its imports/exports/exchange catalog,
+        # so plan stops from the (cached) market payloads instead of dumping
+        # everything on the first marketplace.
         s = self.c.ship(self.ship)
         nav = s.get("nav", {})
         inv = s.get("cargo", {}).get("inventory", [])
         if not inv:
-            return
-        market = self._first_market(nav["systemSymbol"])
-        if not market:
+            return progress
+        system = nav["systemSymbol"]
+        markets = {w["symbol"]: self._market(system, w["symbol"])
+                   for w in self._wps(system, trait="MARKETPLACE")}
+        if not markets:
             self._log("no marketplace to sell at")
-            return
-        if nav["waypointSymbol"] != market:
-            self._status(mode="sell", last=f"→ {market}")
-            s = self._goto(s, market)
-        self.c.dock(self.ship)
-        # top right up here so the next mining run can CRUISE out on a full tank
-        self._maybe_refuel(threshold=0.9)
-        for item in inv:
-            try:
-                data = self.c.sell(self.ship, item["symbol"], item["units"])
-                t = data.get("transaction", {})
-                store.record_trade("sell", item["symbol"], t.get("units", item["units"]),
-                                   t.get("pricePerUnit", 0), t.get("totalPrice", 0),
-                                   ship=self.ship, waypoint=market)
-                self._log(
-                    f"sold {t.get('units', item['units'])} {item['symbol']} "
-                    f"@ {t.get('pricePerUnit')} = {t.get('totalPrice')}c"
-                )
-            except ApiError as e:
-                self._log(f"can't sell {item['symbol']}: {e.message}")
-        # record the fresh prices we just saw here
-        self._record_here(nav["systemSymbol"], market, fresh=True)
+            return progress
+        plan, unsellable = plan_sales(inv, markets)
+        for wp, goods in plan:
+            self._status(mode="sell", last=f"→ {wp}")
+            s = self._goto(s, wp)
+            self.c.dock(self.ship)
+            # top up so the next mining run can CRUISE out on a full tank
+            self._maybe_refuel(threshold=0.9)
+            held = {i["symbol"]: i["units"]
+                    for i in self.c.cargo(self.ship).get("inventory", [])}
+            for good in goods:
+                units = held.get(good, 0)
+                if units <= 0:
+                    continue
+                try:
+                    data = self.c.sell(self.ship, good, units)
+                    t = data.get("transaction", {})
+                    store.record_trade("sell", good, t.get("units", units),
+                                       t.get("pricePerUnit", 0), t.get("totalPrice", 0),
+                                       ship=self.ship, waypoint=wp)
+                    self._log(
+                        f"sold {t.get('units', units)} {good} "
+                        f"@ {t.get('pricePerUnit')} = {t.get('totalPrice')}c"
+                    )
+                    progress = True
+                except ApiError as e:
+                    self._log(f"can't sell {good}: {e.message}")
+            # record the fresh prices we just saw here
+            self._record_here(system, wp, fresh=True)
+        # jettison what no market in the system buys — mined goods are free,
+        # and holding them forever is what livelocked the ship. Never drop a
+        # good an unfinished contract still needs, and never drop anything on
+        # the strength of zero market data (all fetches failed = we know
+        # nothing, not "nothing buys it").
+        if not any(m for m in markets.values()):
+            self._log("no market data available; will retry")
+            return progress
+        keep = set()
+        if contract and not contract.get("fulfilled"):
+            keep = {d["tradeSymbol"] for d in contract["terms"]["deliver"]
+                    if d["unitsFulfilled"] < d["unitsRequired"]}
+        if unsellable:
+            self._unsellable.update(unsellable)
+            held = {i["symbol"]: i["units"]
+                    for i in self.c.cargo(self.ship).get("inventory", [])}
+            for good in unsellable:
+                units = held.get(good, 0)
+                if units <= 0 or good in keep:
+                    continue
+                try:
+                    self.c.jettison(self.ship, good, units)
+                    self._log(f"jettisoned {units} {good} (no market in {system} buys it)")
+                    progress = True
+                except ApiError as e:
+                    self._log(f"jettison failed for {good}: {e.message}")
+        return progress
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -440,7 +488,11 @@ class MinerBot(BaseBot):
 
                 if units >= capacity:
                     self._log(f"cargo full {units}/{capacity} → sell")
-                    self._sell_off(s, contract)
+                    if not self._sell_off(s, contract):
+                        # nothing sold/delivered/jettisoned — don't spin on a
+                        # failing sale, ease off before trying again
+                        self._log("sell made no progress; backing off 30s")
+                        self._sleep(30)
                     tried = set()
                     continue
 
@@ -503,7 +555,9 @@ class MinerBot(BaseBot):
                         ]
                         continue
                     if e.code == 4228 or "cargo" in e.message.lower():
-                        self._sell_off(s, contract)
+                        if not self._sell_off(s, contract):
+                            self._log("sell made no progress; backing off 30s")
+                            self._sleep(30)
                         continue
                     self._log(f"extract error: {e.message}")
                     self._sleep(5)
@@ -514,6 +568,15 @@ class MinerBot(BaseBot):
                     f"+{y.get('units', 0)} {y.get('symbol', '')} "
                     f"(cd {cd.get('totalSeconds', 0)}s)"
                 )
+                # don't haul goods we've learned nothing in-system buys — drop
+                # them at the rock so the hold fills with sellable ore instead
+                if (y.get("symbol") in self._unsellable and y.get("units")
+                        and y.get("symbol") != desired):
+                    try:
+                        self.c.jettison(self.ship, y["symbol"], y["units"])
+                        self._log(f"jettisoned {y['units']} {y['symbol']} (unsellable here)")
+                    except ApiError as e:
+                        self._log(f"jettison failed: {e.message}")
                 if desired and y.get("symbol") != desired and chosen:
                     self.surveys = [
                         sv for sv in self.surveys if sv.get("signature") != chosen.get("signature")
@@ -682,20 +745,38 @@ class TraderBot(BaseBot):
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
 
     def _offload(self, s: dict, system: str) -> None:
-        """Sell any leftover cargo (e.g. from an interrupted trade)."""
+        """Sell any leftover cargo (e.g. from an interrupted trade) — at
+        markets that actually list each good; jettison what nothing buys."""
         inv = s.get("cargo", {}).get("inventory", [])
         if not inv:
             return
-        market = self._first_market(system)
-        if not market:
+        markets = {w["symbol"]: self._market(system, w["symbol"])
+                   for w in self._wps(system, trait="MARKETPLACE")}
+        plan, unsellable = plan_sales(inv, markets)
+        if not plan and not unsellable:
             self._log("leftover cargo but no market to sell at")
             return
-        self._log(f"offloading leftover cargo → {market}")
-        s = self._goto(s, market)
-        self.c.dock(self.ship)
-        for item in list(inv):
-            self._sell(item["symbol"], item.get("units", 1) or 1, waypoint=market)
-        self._record_here(system, market)
+        for wp, goods in plan:
+            self._log(f"offloading leftover cargo → {wp}")
+            s = self._goto(s, wp)
+            self.c.dock(self.ship)
+            for item in list(inv):
+                if item["symbol"] in goods:
+                    self._sell(item["symbol"], item.get("units", 1) or 1, waypoint=wp)
+            self._record_here(system, wp)
+        if not any(m for m in markets.values()):
+            return  # zero market data — keep the cargo, this was bought
+        held = {i["symbol"]: i["units"]
+                for i in self.c.cargo(self.ship).get("inventory", [])}
+        for good in unsellable:
+            units = held.get(good, 0)
+            if units <= 0:
+                continue
+            try:
+                self.c.jettison(self.ship, good, units)
+                self._log(f"jettisoned {units} {good} (no market in {system} buys it)")
+            except ApiError as e:
+                self._log(f"jettison failed for {good}: {e.message}")
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:

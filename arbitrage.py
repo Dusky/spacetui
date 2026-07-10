@@ -69,6 +69,60 @@ def estimate_route_rate(
     return (profit * units) / trip * 3600.0
 
 
+def market_listings(market: dict | None) -> set[str]:
+    """Good symbols a market trades at all — sells to a market fail unless the
+    good is listed. Union of the ``imports``/``exports``/``exchange`` catalogs
+    (present even with no ship at the waypoint) and live ``tradeGoods``."""
+    if not market:
+        return set()
+    out: set[str] = set()
+    for key in ("imports", "exports", "exchange", "tradeGoods"):
+        for g in market.get(key) or []:
+            sym = g.get("symbol") if isinstance(g, dict) else g
+            if sym:
+                out.add(sym)
+    return out
+
+
+def plan_sales(
+    inventory: Iterable[dict], markets: dict[str, dict | None]
+) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Assign each cargo good to a market that actually lists it.
+
+    ``inventory`` is ``[{symbol, units}]``; ``markets`` maps waypoint →
+    market payload (or None). Returns ``(plan, unsellable)`` where ``plan`` is
+    an ordered list of ``(waypoint, [goods])`` stops — greedy fewest-stops:
+    each round picks the market covering the most remaining goods, ties broken
+    by the summed live ``sellPrice`` of those goods — and ``unsellable`` is
+    every good no known market lists.
+    """
+    remaining = {i.get("symbol") for i in inventory if i.get("symbol")}
+    listings = {wp: market_listings(m) for wp, m in markets.items()}
+    prices: dict[str, dict[str, int]] = {}
+    for wp, m in markets.items():
+        prices[wp] = {
+            g.get("symbol"): g.get("sellPrice") or 0
+            for g in (m or {}).get("tradeGoods") or []
+        }
+
+    plan: list[tuple[str, list[str]]] = []
+    while remaining:
+        best_wp, best_goods = None, set()
+        for wp, listed in listings.items():
+            goods = remaining & listed
+            if not goods:
+                continue
+            if (len(goods), sum(prices[wp].get(g, 0) for g in goods)) > (
+                len(best_goods), sum(prices.get(best_wp, {}).get(g, 0) for g in best_goods)
+            ):
+                best_wp, best_goods = wp, goods
+        if best_wp is None:
+            break  # nothing else is listed anywhere
+        plan.append((best_wp, sorted(best_goods)))
+        remaining -= best_goods
+    return plan, sorted(remaining)
+
+
 def demand_factor(sell_points) -> float:
     """A 0<f≤1 multiplier that shrinks order size when a market is being flooded.
 

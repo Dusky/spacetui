@@ -68,6 +68,19 @@ class MineFake:
     def dock(self, sym):
         self.status = "DOCKED"; return {}
 
+    def cargo(self, sym):
+        return {"units": self.cargo_units, "capacity": self.cargo_cap,
+                "inventory": [{"symbol": k, "units": v} for k, v in self.inv.items()]}
+
+    def jettison(self, sym, good, units):
+        have = self.inv.get(good, 0)
+        n = min(units, have)
+        self.inv[good] = have - n
+        if self.inv[good] <= 0:
+            self.inv.pop(good, None)
+        self.cargo_units -= n
+        return {"cargo": self.cargo(sym)}
+
     def set_flight_mode(self, sym, mode):
         self.mode = mode; return {}
 
@@ -174,6 +187,180 @@ def test_next_rock_picks_nearest():
     # avoiding the nearest falls through to the next-nearest
     rock2 = bot._next_rock("X1-AF2", {"X1-AF2-NEAR"}, here="X1-AF2-O")
     assert rock2["symbol"] == "X1-AF2-MID"
+
+
+class SellFake:
+    """The 8-hour livelock layout: market A1 lists only FUEL, market B4 lists
+    IRON_ORE + ICE_WATER; the miner sits at A1 with a full mixed hold."""
+
+    LISTINGS = {
+        "X1-AF2-A1": ["FUEL"],
+        "X1-AF2-B4": ["IRON_ORE", "ICE_WATER"],
+    }
+
+    def __init__(self, fail_markets=False):
+        self.wp = "X1-AF2-A1"
+        self.status = "DOCKED"
+        self.inv = {"IRON_ORE": 20, "ICE_WATER": 10, "QUARTZ_SAND": 10}
+        self.cargo_cap = 40
+        self.fail_markets = fail_markets
+        self.sell_calls = []       # (waypoint, good)
+        self.jettisoned = []       # (good, units)
+        self.nav_log = []
+        self.done = threading.Event()   # set when the hold empties
+
+    @property
+    def cargo_units(self):
+        return sum(self.inv.values())
+
+    def ship(self, sym):
+        return {"symbol": sym,
+                "nav": {"status": self.status, "waypointSymbol": self.wp,
+                        "systemSymbol": "X1-AF2", "route": {}},
+                "fuel": {"current": 400, "capacity": 400},
+                "cargo": {"units": self.cargo_units, "capacity": self.cargo_cap,
+                          "inventory": [{"symbol": k, "units": v} for k, v in self.inv.items()]},
+                "mounts": [{"symbol": "MOUNT_MINING_LASER_I"}]}
+
+    def cargo(self, sym):
+        return self.ship(sym)["cargo"]
+
+    def orbit(self, sym):
+        self.status = "IN_ORBIT"; return {}
+
+    def dock(self, sym):
+        self.status = "DOCKED"; return {}
+
+    def refuel(self, sym):
+        return {"transaction": {}}
+
+    def set_flight_mode(self, sym, mode):
+        return {}
+
+    def cooldown(self, sym):
+        return {}
+
+    def navigate(self, sym, wp):
+        self.nav_log.append(wp)
+        self.wp = wp
+        self.status = "IN_ORBIT"
+        return {"nav": {"status": self.status, "waypointSymbol": wp}}
+
+    def market(self, system, wp):
+        if self.fail_markets:
+            raise ApiError(503, "market temporarily unavailable")
+        return {"symbol": wp,
+                "imports": [{"symbol": g} for g in self.LISTINGS.get(wp, [])]}
+
+    def sell(self, sym, good, units):
+        self.sell_calls.append((self.wp, good))
+        if good not in self.LISTINGS.get(self.wp, []):
+            raise ApiError(4602, f"Trade good {good} is not listed at market {self.wp}")
+        have = self.inv.get(good, 0)
+        n = min(units, have)
+        self.inv[good] = have - n
+        if self.inv[good] <= 0:
+            self.inv.pop(good, None)
+        if not self.inv:
+            self.done.set()
+        return {"transaction": {"units": n, "pricePerUnit": 30, "totalPrice": 30 * n,
+                                "symbol": good}}
+
+    def jettison(self, sym, good, units):
+        self.jettisoned.append((good, units))
+        self.inv.pop(good, None)
+        if not self.inv:
+            self.done.set()
+        return {"cargo": self.cargo(sym)}
+
+    def waypoints(self, system, filters=None):
+        allwp = [
+            {"symbol": "X1-AF2-A1", "type": "PLANET", "x": 10, "y": 5,
+             "traits": [{"symbol": "MARKETPLACE"}]},
+            {"symbol": "X1-AF2-B4", "type": "MOON", "x": 60, "y": 5,
+             "traits": [{"symbol": "MARKETPLACE"}]},
+            {"symbol": "X1-AF2-B8", "type": "ASTEROID_FIELD", "x": 200, "y": 5,
+             "traits": [{"symbol": "MINERAL_DEPOSITS"}]},
+        ]
+        if filters and filters.get("traits"):
+            return [w for w in allwp
+                    if any(t["symbol"] == filters["traits"] for t in w["traits"])]
+        return allwp
+
+    def waypoint(self, system, wp):
+        for w in self.waypoints(system):
+            if w["symbol"] == wp:
+                return w
+        return {"symbol": wp, "traits": []}
+
+
+def test_sell_goes_where_goods_are_listed_and_jettisons_the_rest():
+    c = SellFake()
+    bot = MinerBot(c, "ESOF-1", world=None, on_log=lambda m: None)
+    made_progress = bot._sell_off(c.ship("ESOF-1"), None)
+
+    assert made_progress is True
+    assert c.inv == {}                                # the hold emptied
+    # sold at B4 (which lists the goods), never attempted the unlisted A1 sale
+    assert ("X1-AF2-B4", "IRON_ORE") in c.sell_calls
+    assert ("X1-AF2-B4", "ICE_WATER") in c.sell_calls
+    assert all(wp != "X1-AF2-A1" for wp, _ in c.sell_calls)
+    # the good nothing buys was jettisoned, and remembered as unsellable
+    assert ("QUARTZ_SAND", 10) in c.jettisoned
+    assert "QUARTZ_SAND" in bot._unsellable
+
+
+def test_contract_goods_survive_the_jettison():
+    c = SellFake()
+    bot = MinerBot(c, "ESOF-1", world=None, on_log=lambda m: None)
+    bot.contract_id = "ctr-1"
+    contract = {"id": "ctr-1", "accepted": True, "fulfilled": False,
+                "terms": {"deliver": [{"tradeSymbol": "QUARTZ_SAND",
+                                       "unitsRequired": 100, "unitsFulfilled": 0,
+                                       "destinationSymbol": "X1-AF2-A1"}]}}
+    # deliver_contract isn't implemented on the fake -> delivery is skipped,
+    # but the jettison pass must still protect the contract good
+    c.deliver_contract = lambda cid, ship, good, units: (_ for _ in ()).throw(
+        ApiError(400, "not accepting deliveries in this test"))
+    bot._sell_off(c.ship("ESOF-1"), contract)
+    assert all(g != "QUARTZ_SAND" for g, _ in c.jettisoned)
+    assert c.inv.get("QUARTZ_SAND") == 10             # still aboard
+
+
+def test_no_market_data_means_no_jettison_and_no_progress():
+    c = SellFake(fail_markets=True)
+    bot = MinerBot(c, "ESOF-1", world=None, on_log=lambda m: None)
+    made_progress = bot._sell_off(c.ship("ESOF-1"), None)
+    assert made_progress is False                     # caller backs off 30s
+    assert c.jettisoned == []                         # never dump on zero data
+    assert c.inv["IRON_ORE"] == 20                    # cargo intact
+
+
+def test_known_junk_yield_is_jettisoned_at_the_rock():
+    c = SellFake()
+    c.wp, c.status = "X1-AF2-B8", "IN_ORBIT"          # sitting on the rock
+    c.inv = {}
+    c.extracted = False
+
+    def extract(sym, survey=None):
+        c.extracted = True
+        c.inv["QUARTZ_SAND"] = c.inv.get("QUARTZ_SAND", 0) + 5
+        return {"extraction": {"yield": {"units": 5, "symbol": "QUARTZ_SAND"}},
+                "cooldown": {"totalSeconds": 0}}
+    c.extract = extract
+
+    bot = MinerBot(c, "ESOF-1", world=None, on_log=lambda m: None)
+    bot._unsellable = {"QUARTZ_SAND"}                 # learned on a prior pass
+    t = threading.Thread(target=bot.run, daemon=True)
+    t.start()
+    for _ in range(200):
+        if c.jettisoned:
+            break
+        threading.Event().wait(0.05)
+    bot.stop()
+    t.join(timeout=5)
+    assert c.extracted
+    assert c.jettisoned and c.jettisoned[0][0] == "QUARTZ_SAND"
 
 
 class TransitFake:
