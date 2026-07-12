@@ -686,7 +686,10 @@ class TraderBot(BaseBot):
                 break
         return sold, revenue
 
-    def _execute(self, route: dict, s: dict, capacity: int) -> None:
+    def _execute(self, route: dict, s: dict, capacity: int) -> bool:
+        """Run one buy->sell cycle for ``route``. Returns True if any units were
+        bought (progress), so the caller can back off instead of re-picking the
+        same route and retrying an identical, still-unaffordable purchase."""
         good = route["good"]
         per_tx = max(1, route.get("volume", 1))
         margin = self.min_profit
@@ -707,10 +710,20 @@ class TraderBot(BaseBot):
             self._log(f"easing {good} order to {want}u ({int(factor * 100)}%): sell price softening")
         if self.budget and route["buy"] > 0:
             want = min(want, self.budget // route["buy"])
+        # never size a buy beyond what we can actually afford -- otherwise the
+        # first purchase call fails with "insufficient credits" and, since
+        # nothing about the route changed, the run loop would re-pick this
+        # same route and retry the identical doomed buy every cycle
+        if route["buy"] > 0:
+            try:
+                credits = self.c.my_agent().get("credits", 0)
+            except ApiError:
+                credits = None
+            if credits is not None:
+                want = min(want, credits // route["buy"])
         if want <= 0:
-            self._log(f"budget too small for {good} @ {route['buy']}c")
-            self._sleep(15)
-            return
+            self._log(f"can't afford {good} @ {route['buy']}c; waiting")
+            return False
         buy_system = route.get("buy_system", route["system"])
         sell_system = route.get("sell_system", route["system"])
         hop_note = f"  [{route.get('hops', 0)} hop(s)]" if route.get("hops") else ""
@@ -722,7 +735,7 @@ class TraderBot(BaseBot):
         # buy leg — travel to the buy system first if it's elsewhere
         if system_of(route["buy_wp"]) != s.get("nav", {}).get("systemSymbol", ""):
             if not self._travel_to_system(buy_system):
-                return
+                return False
             s = self.c.ship(self.ship)
         s = self._goto(s, route["buy_wp"])
         self.c.dock(self.ship)
@@ -732,7 +745,7 @@ class TraderBot(BaseBot):
         bought, spent = self._buy(good, want, per_tx, waypoint=route["buy_wp"], ceiling=ceiling)
         self._record_here(buy_system, route["buy_wp"], fresh=True)
         if bought <= 0:
-            return
+            return False
         # never sell below what we actually paid, plus our margin
         avg_buy = spent / bought if bought else route["buy"]
         floor = price_floor(int(avg_buy), margin)
@@ -740,7 +753,7 @@ class TraderBot(BaseBot):
         if sell_system != s.get("nav", {}).get("systemSymbol", ""):
             if not self._travel_to_system(sell_system):
                 self._log("stranded with cargo; will offload next cycle")
-                return
+                return True  # bought something — not a no-progress cycle
             s = self.c.ship(self.ship)
         s = self._goto(s, route["sell_wp"])
         self.c.dock(self.ship)
@@ -749,6 +762,7 @@ class TraderBot(BaseBot):
         sold, revenue = self._sell(good, per_tx, waypoint=route["sell_wp"], floor=floor)
         self._record_here(sell_system, route["sell_wp"], fresh=True)
         self._log(f"trade done {good}: spent {spent}c, earned {revenue}c → net {revenue - spent}c")
+        return True
 
     def _offload(self, s: dict, system: str) -> None:
         """Sell any leftover cargo (e.g. from an interrupted trade) — at
@@ -821,9 +835,14 @@ class TraderBot(BaseBot):
                 if route:
                     claims.claim(route, self.ship)
                     try:
-                        self._execute(route, s, capacity)
+                        progress = self._execute(route, s, capacity)
                     finally:
                         claims.release(route, self.ship)
+                    if not progress:
+                        # nothing bought (unaffordable, stranded, etc.) — the
+                        # route hasn't changed, so retrying instantly would
+                        # just repeat the identical failed purchase forever
+                        self._sleep(30)
                     continue
                 if routes:
                     self._log("all profitable routes claimed by other traders; exploring")
