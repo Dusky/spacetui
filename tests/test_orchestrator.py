@@ -7,12 +7,15 @@ import config
 from orchestrator import Orchestrator, classify_ship
 
 
-def ship(symbol, mounts=(), cargo_cap=0):
-    return {
+def ship(symbol, mounts=(), cargo_cap=0, waypoint=None):
+    s = {
         "symbol": symbol,
         "mounts": [{"symbol": m} for m in mounts],
         "cargo": {"capacity": cargo_cap, "units": 0, "inventory": []},
     }
+    if waypoint:
+        s["nav"] = {"waypointSymbol": waypoint}
+    return s
 
 
 def test_classify_miner():
@@ -90,29 +93,52 @@ def test_reap_removes_vanished_ships():
     assert set(orch.bots) == {"A"}
 
 
-def test_reinvest_buys_when_affordable(monkeypatch):
+def test_reinvest_buys_when_ship_present_at_yard(monkeypatch):
     monkeypatch.setattr(config, "HQ", "X1-HQ-A1")
-    fleet = [ship("A", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30)]
+    fleet = [ship("A", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30, waypoint="X1-HQ-YARD")]
     client = FakeClient(fleet, credits=250_000, price=60_000)
     orch, _ = make_orch(client, expand_ship_type="SHIP_MINING_DRONE", credit_buffer=50_000)
-    orch._maybe_expand(len(fleet))
+    orch._maybe_expand(fleet)
     assert client.purchases == [("SHIP_MINING_DRONE", "X1-HQ-YARD")]
+    assert orch._buy_errand is None
 
 
 def test_reinvest_respects_buffer(monkeypatch):
     monkeypatch.setattr(config, "HQ", "X1-HQ-A1")
-    fleet = [ship("A", cargo_cap=30)]
+    fleet = [ship("A", cargo_cap=30, waypoint="X1-HQ-YARD")]
     client = FakeClient(fleet, credits=80_000, price=60_000)  # only 30k over buffer
     orch, _ = make_orch(client, expand_ship_type="SHIP_MINING_DRONE", credit_buffer=50_000)
-    orch._maybe_expand(len(fleet))
+    orch._maybe_expand(fleet)
     assert client.purchases == []  # can't afford without dipping below reserve
 
 
 def test_no_expand_without_ship_type():
-    client = FakeClient([ship("A", cargo_cap=30)], credits=10_000_000)
+    fleet = [ship("A", cargo_cap=30, waypoint="X1-HQ-YARD")]
+    client = FakeClient(fleet, credits=10_000_000)
     orch, _ = make_orch(client)  # expand_ship_type=None
-    orch._maybe_expand(1)
+    orch._maybe_expand(fleet)
     assert client.purchases == []
+
+
+def test_reinvest_dispatches_scout_instead_of_spamming_a_doomed_purchase(monkeypatch):
+    # no ship is at the yard -> SpaceTraders would reject the purchase every
+    # tick ("must have at least one ship available at the purchase location").
+    # We must never call purchase_ship here; dispatch the scout instead.
+    monkeypatch.setattr(config, "HQ", "X1-HQ-A1")
+    fleet = [ship("A", mounts=["MOUNT_MINING_LASER_I"], cargo_cap=30, waypoint="X1-HQ-B9")]
+    client = FakeClient(fleet, credits=250_000, price=60_000)
+    orch, _ = make_orch(client, expand_ship_type="SHIP_MINING_DRONE", credit_buffer=50_000)
+    orch._maybe_expand(fleet)
+    assert client.purchases == []
+    assert orch._buy_errand == "X1-HQ-YARD"
+    # calling again (next tick) still must not purchase or re-log the dispatch
+    orch._maybe_expand(fleet)
+    assert client.purchases == []
+    # once a ship arrives at the yard, the pending errand is fulfilled
+    fleet.append(ship("B", cargo_cap=30, waypoint="X1-HQ-YARD"))
+    orch._maybe_expand(fleet)
+    assert client.purchases == [("SHIP_MINING_DRONE", "X1-HQ-YARD")]
+    assert orch._buy_errand is None
 
 
 def test_miner_adopts_active_contract():

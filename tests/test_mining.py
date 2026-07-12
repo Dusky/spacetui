@@ -161,6 +161,25 @@ def test_miner_mines_and_sells_instead_of_livelocking():
     assert diverts == [], f"miner diverted to HQ with cargo space: {c.nav_log}"
 
 
+def test_holdless_ship_disengages_instead_of_spinning():
+    # a probe (cargo capacity 0) can't mine: units>=capacity (0>=0) used to read
+    # as "full" and loop forever on "cargo full 0/0 -> sell -> backing off 30s"
+    c = MineFake()
+    c.cargo_cap = 0
+    bot = MinerBot(c, "ESOF-2", world=None, on_log=lambda m: None)
+    t = threading.Thread(target=bot.run, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "hold-less miner never disengaged"
+    assert c.extracts == 0 and c.sells == 0
+
+
+def test_empty_hold_sell_off_counts_as_progress():
+    c = MineFake()  # inv is empty by default
+    bot = MinerBot(c, "ESOF-1", world=None, on_log=lambda m: None)
+    assert bot._sell_off(c.ship("ESOF-1"), None) is True
+
+
 class GeoFake:
     """Only implements what _next_rock needs: a waypoint list with coordinates."""
     WPS = [

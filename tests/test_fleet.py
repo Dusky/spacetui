@@ -69,11 +69,13 @@ def test_expansion_none_when_nothing_for_sale():
 
 
 class FakeClient:
-    def __init__(self, credits, price=60_000, ships=1):
+    def __init__(self, credits, price=60_000, ships=1, ship_present=True):
         self._credits = credits
         self._ships = ships
         self.price = price
         self.purchases = []
+        # whether a fleet ship is present at the yard (purchases require this)
+        self.ship_present = ship_present
 
     def my_agent(self):
         return {"credits": self._credits, "shipCount": self._ships}
@@ -83,6 +85,11 @@ class FakeClient:
 
     def shipyard(self, system, wp):
         return {"symbol": wp, "ships": [{"type": "SHIP_MINING_DRONE", "purchasePrice": self.price}]}
+
+    def ships(self):
+        wp = "X1-SIM-YARD" if self.ship_present else "X1-SIM-ELSEWHERE"
+        return [{"symbol": f"FLEET-{i}", "nav": {"waypointSymbol": wp}}
+                for i in range(self._ships)]
 
     def purchase_ship(self, ship_type, wp):
         self.purchases.append((ship_type, wp))
@@ -97,9 +104,21 @@ def test_find_offer_locates_shipyard():
     assert price == 60_000
 
 
+def test_find_offer_prefers_yard_with_a_present_ship():
+    class TwoYards:
+        def waypoints(self, system, filters=None):
+            return [{"symbol": "X1-SIM-FAR"}, {"symbol": "X1-SIM-NEAR"}]
+
+        def shipyard(self, system, wp):
+            return {"symbol": wp, "ships": [{"type": "SHIP_MINING_DRONE", "purchasePrice": 60_000}]}
+
+    wp, _ = find_offer(TwoYards(), "X1-SIM", "SHIP_MINING_DRONE", present={"X1-SIM-NEAR"})
+    assert wp == "X1-SIM-NEAR"
+
+
 def test_fleet_manager_buys_until_buffer_hit():
     # 250k, keep 50k reserve, 60k each -> 200k/60k = 3 ships, then stop
-    c = FakeClient(250_000, price=60_000, ships=0)
+    c = FakeClient(250_000, price=60_000, ships=1)  # one ship, already at the yard
     logs, bought_syms = [], []
     fm = FleetManager(
         c, "SHIP_MINING_DRONE", system="X1-SIM", credit_buffer=50_000,
@@ -117,3 +136,17 @@ def test_fleet_manager_stops_at_max_ships():
     fm = FleetManager(c, "SHIP_MINING_DRONE", system="X1-SIM", credit_buffer=0, max_ships=10)
     assert fm.run() == 2
     assert c._ships == 10
+
+
+def test_fleet_manager_stops_cleanly_with_no_ship_at_the_yard():
+    # no fleet ship is present at the only shipyard -> the API would reject
+    # every purchase; assert we log a clear message and stop instead of
+    # spamming "must have at least one ship available at the purchase location"
+    c = FakeClient(250_000, price=60_000, ships=1, ship_present=False)
+    logs = []
+    fm = FleetManager(c, "SHIP_MINING_DRONE", system="X1-SIM",
+                      credit_buffer=50_000, on_log=logs.append)
+    n = fm.run()
+    assert n == 0
+    assert c.purchases == []
+    assert any("no ship at a shipyard" in m for m in logs)

@@ -110,18 +110,25 @@ def find_offer(
     system: str,
     ship_type: str,
     waypoint: str | None = None,
+    present: set[str] | None = None,
 ) -> tuple[str | None, int | None]:
     """Locate a shipyard selling ``ship_type``.
 
     Returns ``(waypoint, price)``. ``price`` is ``None`` when no ship is present
     at the yard (the API only exposes live prices then), but the waypoint is
     still returned as a fallback so the purchase can be attempted.
+
+    A ship can only be purchased at a yard where you already have a ship, so
+    when ``present`` (the waypoints where the agent currently has ships) is
+    given, a yard in that set is preferred over any other.
     """
     candidates = (
         [waypoint]
         if waypoint
         else [w["symbol"] for w in client.waypoints(system, filters={"traits": "SHIPYARD"})]
     )
+    if present:  # try yards where we already have a ship first
+        candidates = sorted(candidates, key=lambda wp: wp not in present)
     fallback: str | None = None
     for wp in candidates:
         if not wp:
@@ -130,11 +137,14 @@ def find_offer(
             yard = client.shipyard(_system_of(wp), wp)
         except ApiError:
             continue
+        sells = False
         for offer in yard.get("ships", []):  # live listings incl. price
             if offer.get("type") == ship_type:
-                return wp, offer.get("purchasePrice")
+                if present is None or wp in present:
+                    return wp, offer.get("purchasePrice")
+                sells = True
         types = {t.get("type") if isinstance(t, dict) else t for t in yard.get("shipTypes", [])}
-        if ship_type in types and fallback is None:
+        if (sells or ship_type in types) and fallback is None:
             fallback = wp
     return fallback, None
 
@@ -193,11 +203,22 @@ class FleetManager:
             it += 1
             agent = self.c.my_agent()
             credits = agent.get("credits", 0)
-            ship_count = agent.get("shipCount", 0)
+            ships = self.c.ships()
+            ship_count = agent.get("shipCount", len(ships))
+            present = {s["nav"]["waypointSymbol"] for s in ships if s.get("nav")}
 
-            wp, price = find_offer(self.c, self.system, self.ship_type, self.waypoint)
+            wp, price = find_offer(
+                self.c, self.system, self.ship_type, self.waypoint, present=present)
             if not wp:
                 self.on_log(f"no shipyard sells {self.ship_type} in {self.system}")
+                break
+            if wp not in present:
+                # a ship must be present at a shipyard to buy there — surfacing
+                # the raw API rejection every loop would just spam the log
+                self.on_log(
+                    f"no ship at a shipyard selling {self.ship_type}; "
+                    f"move one to {wp} first"
+                )
                 break
             if self.max_price and price and price > self.max_price:
                 self.on_log(

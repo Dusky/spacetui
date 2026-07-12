@@ -380,7 +380,7 @@ class MinerBot(BaseBot):
         nav = s.get("nav", {})
         inv = s.get("cargo", {}).get("inventory", [])
         if not inv:
-            return progress
+            return True  # nothing to sell is success, not a stalled sale
         system = nav["systemSymbol"]
         markets = {w["symbol"]: self._market(system, w["symbol"])
                    for w in self._wps(system, trait="MARKETPLACE")}
@@ -469,6 +469,12 @@ class MinerBot(BaseBot):
                 cargo = s.get("cargo", {})
                 capacity = cargo.get("capacity", 0)
                 units = cargo.get("units", 0)
+
+                # a hold-less hull (a probe/satellite) can't mine — bailing here
+                # avoids the 0/0 "cargo full → sell" spin. Should be a scout.
+                if capacity <= 0:
+                    self._log("no cargo hold — cannot mine; disengaging (use a scout)")
+                    break
 
                 contract = None
                 if self.contract_id:
@@ -870,6 +876,7 @@ class ScoutBot(BaseBot):
         max_age_s: float = 600.0,
         dwell: int = 45,
         explore: bool = False,
+        get_errand=None,
         world=None,
         on_log=None,
         on_status=None,
@@ -881,6 +888,10 @@ class ScoutBot(BaseBot):
         self.dwell = dwell
         # explore mode: also chart UNCHARTED waypoints to widen the world model
         self.explore = explore
+        # optional callable returning a waypoint the orchestrator needs a ship
+        # at right now (e.g. a shipyard to reinvest at) -- takes priority over
+        # ordinary market touring, since the scout is the cheapest ship to divert
+        self.get_errand = get_errand
 
     def _chart_here(self, system: str, here: str) -> None:
         """Chart the current waypoint if it's still uncharted (explore goal)."""
@@ -908,6 +919,18 @@ class ScoutBot(BaseBot):
                 self._record_here(system, here)
                 if self.cross_system:
                     self._map_gate(system)
+
+                errand = self.get_errand() if self.get_errand else None
+                if errand:
+                    if here != errand:
+                        self._status(mode="errand", last=f"→ {errand}")
+                        self._goto(s, errand)
+                        continue
+                    # at the yard — dwell so the orchestrator has a ship present
+                    # to complete the purchase, then resume touring once it's done
+                    self._status(mode="errand", last=f"waiting at {errand}")
+                    self._sleep(5)
+                    continue
 
                 nxt = self._next_unscanned_market(system, here)
                 if nxt:

@@ -71,6 +71,9 @@ class Orchestrator:
         self.tick = tick
         # shared world model so every bot this controller deploys hits one cache
         self.world = world if world is not None else world_mod.WORLD
+        # a shipyard a ship must reach before we can reinvest there (dispatched
+        # to the scout via its get_errand hook); None when no errand is pending
+        self._buy_errand: str | None = None
         self._contract_mgr: ContractManager | None = None
         self.on_log = on_log or (lambda m: None)
         self.on_deploy = on_deploy or (lambda sym, role: None)
@@ -123,7 +126,8 @@ class Orchestrator:
         else:
             bot = ScoutBot(self.c, ship_symbol, world=self.world,
                            cross_system=self.cross_system,
-                           explore=(self.goal == "explore"), on_log=log)
+                           explore=(self.goal == "explore"),
+                           get_errand=lambda: self._buy_errand, on_log=log)
         bot._role = role
         return bot
 
@@ -193,7 +197,7 @@ class Orchestrator:
         types = self.world.ship_types(system) if self.world else []
         return pick_expansion_type(self.roster(), types)
 
-    def _maybe_expand(self, ship_count: int) -> None:
+    def _maybe_expand(self, ships: list[dict]) -> None:
         if not self.expand_ship_type:
             return
         try:
@@ -202,15 +206,26 @@ class Orchestrator:
             if not ship_type:
                 return
             credits = self.c.my_agent().get("credits", 0)
-            wp, price = find_offer(self.c, system, ship_type)
+            present = {s["nav"]["waypointSymbol"] for s in ships if s.get("nav")}
+            wp, price = find_offer(self.c, system, ship_type, present=present)
             if not wp:
                 return
             n = plan_expansion(
-                credits, ship_count, unit_price=price if price else 1,
+                credits, len(ships), unit_price=price if price else 1,
                 credit_buffer=self.credit_buffer, max_ships=self.max_ships,
             )
             if n <= 0:
+                self._buy_errand = None
                 return
+            if wp not in present:
+                # can't buy here yet — no ship of ours is at this yard. Send the
+                # scout instead of hammering a purchase the API will always
+                # reject (a ship must be present to buy).
+                if self._buy_errand != wp:
+                    self._buy_errand = wp
+                    self.on_log(f"reinvest ready but no ship at {wp}; dispatching scout")
+                return
+            self._buy_errand = None
             data = self.c.purchase_ship(ship_type, wp)
             new = data.get("ship", {}).get("symbol", "?")
             self.on_log(f"reinvested → bought {new} ({ship_type})")
@@ -236,7 +251,7 @@ class Orchestrator:
                         self._start_contract_mgr(ships[0]["symbol"])
                     for ship in ships:
                         self._deploy(ship)
-                    self._maybe_expand(len(ships))
+                    self._maybe_expand(ships)
                 except Exception as e:  # keep supervising despite transient errors
                     self.on_log(f"supervisor error: {e!r}")
                 self._sleep(self.tick)
