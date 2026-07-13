@@ -83,3 +83,20 @@ def test_network_error_retried_then_raised():
     with pytest.raises(ApiError):
         c.get("/x")
     assert c.session.calls == 10  # exhausted the retry budget before giving up
+
+
+def test_is_invalid_token_error_matches_the_reset_date_mismatch():
+    e = ApiError(4113, "Failed to parse token. Token reset_date does not match "
+                       "the server. ... you should re-register your agent. "
+                       "Expected: 2026-07-12, Actual: 2026-07-05")
+    assert api.is_invalid_token_error(e) is True
+
+
+def test_is_invalid_token_error_matches_bare_401():
+    assert api.is_invalid_token_error(ApiError(401, "Unauthorized")) is True
+
+
+def test_is_invalid_token_error_false_for_ordinary_failures():
+    assert api.is_invalid_token_error(ApiError(4203, "insufficient fuel for CRUISE")) is False
+    assert api.is_invalid_token_error(ApiError(429, "rate limited")) is False
+    assert api.is_invalid_token_error(ApiError(0, "network error: timeout")) is False

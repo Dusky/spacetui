@@ -348,3 +348,49 @@ def test_token_auth_blocks_and_allows():
     assert any(ck.startswith("st_token=sekret") for ck in r.headers.getlist("Set-Cookie"))
     # cookie now carries auth for subsequent API calls
     assert c.get("/api/state").status_code == 200
+
+
+class DeadTokenClient(FakeClient):
+    """my_agent() fails with the server-reset invalid-token error, every call."""
+
+    def __init__(self):
+        super().__init__()
+        self.agent_calls = 0
+
+    def my_agent(self):
+        self.agent_calls += 1
+        from api import ApiError
+        raise ApiError(4113, "Failed to parse token. Token reset_date does not "
+                             "match the server. ... re-register your agent. "
+                             "Expected: 2026-07-12, Actual: 2026-07-05")
+
+
+def test_refresh_flags_a_dead_token_and_stops_the_poller():
+    c = DeadTokenClient()
+    app = create_app(c, start_poller=False)
+    hub = app.hub
+    logs = []
+    hub.log = lambda m: logs.append(m)
+
+    hub.refresh()
+    assert hub._poll_ok is False
+    assert hub._stop.is_set(), "poller wasn't told to stop on a dead token"
+    assert any("FATAL" in m and "re-register" in m for m in logs)
+
+
+def test_poller_thread_stops_instead_of_hammering_a_dead_token():
+    import time
+    c = DeadTokenClient()
+    app = create_app(c, start_poller=False)
+    hub = app.hub
+    hub.log = lambda m: None
+
+    hub.start_poller(interval=0.02)  # would be dozens of polls/sec if unbounded
+    time.sleep(0.3)
+    calls_after_settling = c.agent_calls
+    assert calls_after_settling >= 1
+    time.sleep(0.2)  # give a broken implementation room to keep spamming
+    assert c.agent_calls == calls_after_settling, (
+        "poller kept calling my_agent() on a dead token instead of stopping"
+    )
+    assert not hub._poller.is_alive()

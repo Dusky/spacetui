@@ -207,3 +207,26 @@ def test_reap_dead_redeploys_halted_bot():
     orch._reap_dead()
     assert "A" not in orch.bots  # forgotten, so the next tick redeploys it
 
+
+
+class DeadTokenClient:
+    """Every call fails with the server-reset invalid-token error."""
+
+    def ships(self):
+        from api import ApiError
+        raise ApiError(4113, "Failed to parse token. Token reset_date does not "
+                             "match the server. ... re-register your agent. "
+                             "Expected: 2026-07-12, Actual: 2026-07-05")
+
+
+def test_orchestrator_stops_instead_of_retrying_a_dead_token():
+    logs = []
+    orch = Orchestrator(DeadTokenClient(), tick=0, spawn=lambda bot: None,
+                       on_log=logs.append)
+    orch.start()
+    orch._sup.join(timeout=5)
+
+    assert not orch.running, "orchestrator kept looping on a dead token"
+    assert any("FATAL" in m and "re-register" in m for m in logs)
+    # exactly one failure logged -- not a retry-forever spam
+    assert sum("supervisor error" in m for m in logs) == 0

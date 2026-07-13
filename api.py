@@ -17,6 +17,22 @@ class ApiError(Exception):
         self.data = data or {}
 
 
+# SpaceTraders alpha resets its server periodically, which invalidates every
+# existing agent token (the token embeds a reset_date claim that no longer
+# matches). No amount of retrying an ApiError like this will ever succeed --
+# the agent must be re-registered and the token in .env replaced.
+_FATAL_TOKEN_CODE = 4113
+
+
+def is_invalid_token_error(e: ApiError) -> bool:
+    """True when the API is rejecting the token itself (dead, wrong agent, or
+    invalidated by a server reset), not a specific in-game action. Callers
+    that loop on transient failures must stop instead of retrying forever."""
+    if e.code in (401, _FATAL_TOKEN_CODE):
+        return True
+    return "re-register your agent" in (e.message or "").lower()
+
+
 class Client:
     """Thin wrapper around the SpaceTraders v2 API."""
 

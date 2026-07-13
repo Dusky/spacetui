@@ -12,7 +12,7 @@ import datetime as dt
 import threading
 import time
 
-from api import ApiError, Client
+from api import ApiError, Client, is_invalid_token_error
 
 
 def _not_expired(c: dict, now: dt.datetime) -> bool:
@@ -142,6 +142,16 @@ class ContractManager:
                         self.active_contract_id = cid
                         self.on_log(f"negotiated + accepted contract for {_good(c)}")
             except ApiError as e:
+                if is_invalid_token_error(e):
+                    # unrecoverable -- retrying every tick forever just
+                    # hammers the API with a doomed request. Stop clean.
+                    self.on_log(
+                        f"FATAL: agent token is invalid ({e.message}). "
+                        "Re-register the agent, update the token, and "
+                        "restart. Contract manager stopping."
+                    )
+                    self.stop()
+                    break
                 self.on_log(f"contract step failed: {e.message}")
             self.on_status(running=not self.cancelled, last=self.active_contract_id or "idle")
             self._sleep(self.tick)

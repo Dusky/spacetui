@@ -15,7 +15,7 @@ import time
 import config
 import store
 import world as world_mod
-from api import ApiError, Client
+from api import ApiError, Client, is_invalid_token_error
 from contracts import ContractManager
 from fleet import find_offer, pick_expansion_type, plan_expansion
 from routing import system_of
@@ -252,6 +252,18 @@ class Orchestrator:
                     for ship in ships:
                         self._deploy(ship)
                     self._maybe_expand(ships)
+                except ApiError as e:
+                    if is_invalid_token_error(e):
+                        # unrecoverable -- retrying every tick forever just
+                        # hammers the API with a doomed request. Stop clean.
+                        self.on_log(
+                            f"FATAL: agent token is invalid ({e.message}). "
+                            "Re-register the agent, update the token, and "
+                            "restart. Orchestrator stopping."
+                        )
+                        self.stop()
+                        break
+                    self.on_log(f"supervisor error: {e!r}")
                 except Exception as e:  # keep supervising despite transient errors
                     self.on_log(f"supervisor error: {e!r}")
                 self._sleep(self.tick)

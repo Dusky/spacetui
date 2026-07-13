@@ -107,3 +107,29 @@ def test_manager_negotiates_then_accepts():
     # now the same contract is accepted -> "work"
     assert pick_contract_action(c.contracts())[0] == "work"
     assert mgr.active_contract_id == "new-1"
+
+class DeadTokenClient:
+    """Every call fails with the server-reset invalid-token error."""
+
+    def contracts(self):
+        from api import ApiError
+        raise ApiError(4113, "Failed to parse token. Token reset_date does not "
+                             "match the server. ... re-register your agent. "
+                             "Expected: 2026-07-12, Actual: 2026-07-05")
+
+
+def test_manager_stops_instead_of_retrying_a_dead_token():
+    import threading
+
+    c = DeadTokenClient()
+    logs = []
+    mgr = ContractManager(c, "SHIP-1", tick=0, on_log=logs.append)
+    t = threading.Thread(target=mgr.run, daemon=True)
+    t.start()
+    t.join(timeout=5)
+
+    assert not t.is_alive(), "contract manager kept looping on a dead token"
+    assert mgr.cancelled
+    assert any("FATAL" in m and "re-register" in m for m in logs)
+    # exactly one failure logged -- not a retry-forever spam
+    assert sum("contract step failed" in m for m in logs) == 0

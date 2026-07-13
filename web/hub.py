@@ -18,7 +18,7 @@ import config
 import metrics as metrics_mod
 import store
 import world as world_mod
-from api import ApiError, Client
+from api import ApiError, Client, is_invalid_token_error
 from orchestrator import Orchestrator, classify_ship
 from ratelimit import LIMITER
 from tui.bots import MinerBot, ScoutBot, TraderBot
@@ -144,6 +144,22 @@ class Hub:
             agent = self.c.my_agent()
             ships = self.c.ships()
             contracts = self.c.contracts()
+        except ApiError as e:
+            with self._lock:
+                self._poll_ok = False
+                self._poll_err = str(e)
+                self._last_poll = time.strftime("%H:%M:%S")
+            if is_invalid_token_error(e):
+                # unrecoverable -- polling every few seconds forever just
+                # hammers the API with a doomed request. Stop clean; the
+                # error stays visible in the cached snapshot for the UI.
+                self.log(
+                    f"FATAL: agent token is invalid ({e.message}). "
+                    "Re-register the agent, update the token, and restart. "
+                    "Polling stopped."
+                )
+                self.shutdown()
+            return
         except Exception as e:  # noqa - keep serving the last good snapshot
             with self._lock:
                 self._poll_ok = False
